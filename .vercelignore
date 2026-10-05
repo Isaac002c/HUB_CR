@@ -1,0 +1,4 @@
+tmp/
+-C
+.codex-tmp/
+cr-*-deploy-*.tar.gz

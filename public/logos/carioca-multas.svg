@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="silverShield" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#e8e0f0"/>
+      <stop offset="40%"  stop-color="#c8b8e0"/>
+      <stop offset="70%"  stop-color="#a890c8"/>
+      <stop offset="100%" stop-color="#d4c4e8"/>
+    </linearGradient>
+    <linearGradient id="silverM" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f0eaf8"/>
+      <stop offset="50%"  stop-color="#c8b8e0"/>
+      <stop offset="100%" stop-color="#e0d0f0"/>
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#3D1C7A"/>
+      <stop offset="100%" stop-color="#2D1457"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="98" fill="url(#bgGrad)"/>
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#5a3a9a" stroke-width="1"/>
+
+  <!-- Shield shape (pointed bottom) -->
+  <path d="M100 28 L148 50 L148 98 C148 130 128 152 100 164 C72 152 52 130 52 98 L52 50 Z"
+        fill="url(#silverShield)" opacity="0.15"/>
+  <path d="M100 28 L148 50 L148 98 C148 130 128 152 100 164 C72 152 52 130 52 98 L52 50 Z"
+        fill="none" stroke="url(#silverShield)" stroke-width="3.5" stroke-linejoin="round"/>
+
+  <!-- Inner shield border -->
+  <path d="M100 36 L142 56 L142 98 C142 126 124 146 100 157 C76 146 58 126 58 98 L58 56 Z"
+        fill="none" stroke="#c8b8e0" stroke-width="1.2" opacity="0.4"/>
+
+  <!-- M letter -->
+  <text x="100" y="118"
+        text-anchor="middle"
+        font-family="'Arial Black','Arial Bold',sans-serif"
+        font-size="72"
+        font-weight="900"
+        fill="url(#silverM)"
+        letter-spacing="-2">M</text>
+
+  <!-- CARIOCA text -->
+  <text x="100" y="152"
+        text-anchor="middle"
+        font-family="Arial,sans-serif"
+        font-size="17"
+        font-weight="700"
+        fill="#c8b8e0"
+        letter-spacing="3.5">CARIOCA</text>
+
+  <!-- MULTAS text -->
+  <text x="100" y="172"
+        text-anchor="middle"
+        font-family="Arial,sans-serif"
+        font-size="17"
+        font-weight="700"
+        fill="#c8b8e0"
+        letter-spacing="3.5">MULTAS</text>
+</svg>

@@ -1,0 +1,37 @@
+{
+  "name": "cr-recursos-backend",
+  "version": "1.0.0",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js",
+    "test": "node tests/rbac.test.js && node tests/workbook.test.js && node tests/integration.test.js && node tests/email.test.js && node tests/generatedDocuments.test.js",
+    "test:rbac": "node tests/rbac.test.js",
+    "test:workbook": "node tests/workbook.test.js",
+    "test:integration": "node tests/integration.test.js",
+    "test:email": "node tests/email.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.2",
+    "express-rate-limit": "^8.6.2",
+    "express-validator": "^7.3.2",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "pdfkit": "^0.17.2",
+    "pg": "^8.11.3",
+    "resend": "^6.21.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@electric-sql/pglite-socket": "^0.2.7"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

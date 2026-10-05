@@ -1,0 +1,73 @@
+name: cr-recursos
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: cr-recursos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cr_recursos}
+      POSTGRES_USER: ${POSTGRES_USER:-cr_recursos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD obrigatoria}
+    volumes:
+      - cr-recursos-postgres-data:/var/lib/postgresql/data
+    networks:
+      - cr-recursos-private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cr_recursos} -d ${POSTGRES_DB:-cr_recursos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cr-recursos-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DB_SSL: "false"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cr_recursos}:${POSTGRES_PASSWORD}@cr-recursos-postgres:5432/${POSTGRES_DB:-cr_recursos}?sslmode=disable
+    volumes:
+      - cr-recursos-uploads:/app/uploads
+    ports:
+      - "127.0.0.1:8099:5000"
+    networks:
+      - cr-recursos-private
+      - chronostek-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  cr-recursos-postgres-data:
+    name: cr-recursos-postgres-data
+  cr-recursos-uploads:
+    name: cr-recursos-uploads
+    external: true
+
+networks:
+  cr-recursos-private:
+    name: cr-recursos-private
+    internal: true
+  chronostek-network:
+    external: true

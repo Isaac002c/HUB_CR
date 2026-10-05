@@ -1,0 +1,48 @@
+# Environment files and credentials (only sanitized examples are tracked)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Dependencies and build output
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+.vercel/
+
+# Local tooling and generated artifacts
+.claude/
+.codex-tmp/
+/tmp/
+/output/
+/backend/uploads/
+/public/uploads/
+/backend/assets/camila-rodrigues-signature.png
+/backend/database/
+/backend/templates/
+/ops/repairs/
+
+# Backups, archives, databases, and logs
+*.tar
+*.tar.gz
+*.tgz
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+*.sql.gz
+*.log
+npm-debug.log*
+/logs/
+/-C
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+coverage/
+*.tsbuildinfo
