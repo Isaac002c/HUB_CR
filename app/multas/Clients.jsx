@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { getClients, createClient, updateClient, deleteClient } from '../lib/clientsAPI';
+import { getClients, searchClients, createClient, updateClient, deleteClient } from '../lib/clientsAPI';
 import { getConsultants } from '../lib/calendarAPI';
 
 const toInputDate = (value) => (!value ? '' : value.substring(0, 10));
@@ -92,6 +92,8 @@ export default function MultasClients() {
   const [showModal, setShowModal]     = useState(false);
   const [editingClient, setEditingClient] = useState(null);
   const [searchTerm, setSearchTerm]   = useState('');
+  const [outsideSearch, setOutsideSearch] = useState({ query: '', clients: [] });
+  const [searchingOutside, setSearchingOutside] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterConsultant, setFilterConsultant] = useState('');
   const [formData, setFormData]       = useState(EMPTY_FORM);
@@ -104,6 +106,31 @@ export default function MultasClients() {
   const canManageConsultant = ['master', 'supervisor'].includes(currentRole);
 
   useEffect(() => { loadClients(); }, []);
+
+  useEffect(() => {
+    const query = searchTerm.trim();
+    if (query.length < 3) return undefined;
+
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      setSearchingOutside(true);
+      searchClients(query)
+        .then((results) => {
+          if (!cancelled) setOutsideSearch({ query, clients: results || [] });
+        })
+        .catch(() => {
+          if (!cancelled) setOutsideSearch({ query, clients: [] });
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingOutside(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [searchTerm]);
 
   const loadClients = async () => {
     try {
@@ -230,6 +257,14 @@ export default function MultasClients() {
     return [client.name, client.cpf, client.cnh, client.phone, client.email, client.consultant_name]
       .some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(normalizedSearch));
   });
+  const currentOutsideSearch = outsideSearch.query.toLocaleLowerCase('pt-BR') === normalizedSearch
+    ? outsideSearch.clients
+    : [];
+  const outsideScopeMatches = currentOutsideSearch.filter((client) => (
+    !CLIENTS_PAGE_STATUSES.has(client.status)
+    && (!filterStatus || client.status === filterStatus)
+    && (!filterConsultant || client.created_by === filterConsultant)
+  ));
 
   const consultantSource = consultants.length > 0
     ? consultants.map((consultant) => [consultant.id, consultant.name || 'Sem nome'])
@@ -330,6 +365,31 @@ export default function MultasClients() {
         </button>
       </div>
 
+      {normalizedSearch.length >= 3 && searchingOutside && (
+        <p className="clients-outside-searching" role="status">Verificando cadastros fora da lista padrão…</p>
+      )}
+      {normalizedSearch.length >= 3 && outsideScopeMatches.length > 0 && (
+        <section className="clients-outside-results" aria-label="Cadastros encontrados fora da lista padrão">
+          <div className="clients-outside-results-heading">
+            <strong>Cadastro encontrado fora da lista padrão</strong>
+            <span>Clientes mostra somente Negociação e Fechado. Estes registros não entram na contagem acima.</span>
+          </div>
+          <ul>
+            {outsideScopeMatches.map((client) => (
+              <li key={client.id}>
+                <div className="clients-outside-result-details">
+                  <strong>{client.name}</strong>
+                  <span>Status: {STATUS_LABELS[client.status] || client.status || 'Não informado'} · Consultor: {client.consultant_name || 'Não atribuído'}</span>
+                </div>
+                <button type="button" onClick={() => router.push(`/multas/clients/${client.id}`)}>
+                  Abrir ficha
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       {/* Tabela */}
       <div className="clients-table-wrap">
         <table className="data-table">
@@ -365,7 +425,11 @@ export default function MultasClients() {
                       <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
                     </svg>
                     <p style={{ color: '#94a3b8' }}>
-                      {filterStatus ? `Nenhum cliente com status "${STATUS_LABELS[filterStatus]}"` : 'Nenhum cliente cadastrado'}
+                      {outsideScopeMatches.length > 0
+                        ? 'Nenhum cliente em Negociação ou Fechado corresponde à busca. Veja o cadastro encontrado acima.'
+                        : filterStatus
+                          ? `Nenhum cliente com status "${STATUS_LABELS[filterStatus]}"`
+                          : 'Nenhum cliente cadastrado'}
                     </p>
                   </div>
                 </td>
