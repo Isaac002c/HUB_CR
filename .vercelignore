@@ -2,3 +2,28 @@ tmp/
 -C
 .codex-tmp/
 cr-*-deploy-*.tar.gz
+
+# Environment files and credentials must never enter a deployment bundle.
+.env
+.env.*
+backend/.env
+backend/.env.*
+
+# Local data, generated files, and dependencies are not deployment sources.
+.git/
+.vercel/
+.next/
+node_modules/
+backend/node_modules/
+backend/database/
+backend/uploads/
+public/uploads/
+ops/repairs/
+output/
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+*.log
