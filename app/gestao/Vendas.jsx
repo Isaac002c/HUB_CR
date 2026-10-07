@@ -185,9 +185,12 @@ export default function Vendas() {
             <td>{installmentFrequencyLabel(item.installment_frequency)}</td>
             <td>{item.seller_name || '—'}</td>
             <td><span style={followUpStatusStyle(item.follow_up_status)}>{followUpStatusLabel(item.follow_up_status)}</span></td>
-            <td>{item.is_next_installment
-              ? <div style={followUpActions}><button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setScheduleModal(item)}>✎ Ajustar</button><button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setModal({ sale: null, nextFrom: item })}>✓ Confirmar pagamento</button></div>
-              : <span style={{ ...muted, whiteSpace: 'nowrap' }}>Aguardar anterior</span>}</td>
+            <td><div style={followUpActions}>
+              <button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setScheduleModal(item)}>✎ Ajustar</button>
+              {item.is_next_installment
+                ? <button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setModal({ sale: null, nextFrom: item })}>✓ Confirmar pagamento</button>
+                : <span style={{ ...muted, whiteSpace: 'nowrap' }}>Aguardar anterior</span>}
+            </div></td>
           </tr>)}</tbody>
         </table></div> : <div style={followUpEmpty}>Nenhuma cobrança pendente para esta competência.</div>}
       </section>
@@ -313,16 +316,38 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
     closing_method: source?.closing_method || 'remoto',
     status: sale?.status || 'confirmed',
   });
+  const [futureSchedule, setFutureSchedule] = useState(() => createFutureSchedule(
+    source?.installment_total ?? 2,
+    source?.next_installment_due_date || nextDateAfter(localIsoDate(), initialFrequency),
+    initialFrequency,
+  ));
   const set = (key) => (event) => setForm((previous) => ({ ...previous, [key]: event.target.value }));
+  const setInstallmentTotal = (event) => {
+    const total = Number(event.target.value);
+    setForm((previous) => ({ ...previous, installment_total: event.target.value }));
+    setFutureSchedule((previous) => createFutureSchedule(
+      total, nextDateAfter(form.closed_at, form.installment_frequency), form.installment_frequency, previous,
+    ));
+  };
+  const setScheduleField = (installmentNumber, key) => (event) => {
+    const value = event.target.value;
+    setFutureSchedule((previous) => previous.map((item) => item.installment_number === installmentNumber
+      ? { ...item, [key]: value }
+      : item));
+  };
   const setFrequency = (event) => {
     const frequency = event.target.value;
+    const firstDue = nextDateAfter(form.closed_at, frequency);
     setForm((previous) => ({
       ...previous,
       installment_frequency: frequency,
       next_installment_due_date: frequency === 'manual'
         ? ''
-        : nextDateAfter(nextFrom?.next_installment_due_date || previous.closed_at, frequency),
+        : firstDue,
     }));
+    setFutureSchedule((previous) => createFutureSchedule(
+      form.installment_total, firstDue, frequency, previous.map((item) => ({ ...item, due_date: '' })),
+    ));
   };
   const consultant = responsibles.find((item) => item.option_key === form.responsible_key);
   const finalInstallment = hasInstallment && Number(form.installment_number) >= Number(form.installment_total);
@@ -342,6 +367,10 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
         if (!form.service_name.trim()) return alert('Informe o serviço.');
         if (!form.amount || Number(form.amount) <= 0) return alert('Informe um valor pago válido.');
         if (hasInstallment && Number(form.installment_number) > Number(form.installment_total)) return alert('A parcela atual não pode ser maior que o total de parcelas.');
+        const shouldCreateSchedule = !sale && !nextFrom && hasInstallment && !settled;
+        if (shouldCreateSchedule && futureSchedule.some((item) => !item.due_date || !item.expected_amount || Number(item.expected_amount) <= 0)) {
+          return alert('Informe o vencimento e o valor previsto de cada parcela futura.');
+        }
         setSubmitting(true);
         const succeeded = await onSubmit({
           seller_id: consultant.seller_id,
@@ -356,6 +385,11 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
           installment_plan_id: hasInstallment ? source?.installment_plan_id || null : null,
           installment_frequency: hasInstallment ? form.installment_frequency : null,
           next_installment_due_date: hasInstallment && !settled ? form.next_installment_due_date : null,
+          ...(shouldCreateSchedule ? { installment_schedule: futureSchedule.map((item) => ({
+            installment_number: item.installment_number,
+            due_date: item.due_date,
+            expected_amount: Number(item.expected_amount),
+          })) } : {}),
           is_settlement: hasInstallment ? settled : false,
           payment_method: form.payment_method,
           closing_method: form.closing_method,
@@ -384,11 +418,21 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
         <div style={installmentCard}>
           <label style={checkStyle}><input type="checkbox" checked={hasInstallment} disabled={Boolean(nextFrom)} onChange={(event) => setHasInstallment(event.target.checked)} /> Pagamento parcelado</label>
           {hasInstallment && <div style={{ display: 'flex', gap: 10, alignItems: 'end', flexWrap: 'wrap', width: '100%' }}>
-            <Field label="Parcela atual"><input type="number" min="1" max="120" value={form.installment_number} onChange={set('installment_number')} readOnly={Boolean(nextFrom)} required /></Field>
-            <Field label="Total de parcelas"><input type="number" min="1" max="120" value={form.installment_total} onChange={set('installment_total')} readOnly={Boolean(nextFrom)} required /></Field>
+            <Field label="Parcela atual"><input type="number" min="1" max="120" value={form.installment_number} onChange={set('installment_number')} readOnly={!sale || Boolean(nextFrom)} required /></Field>
+            <Field label="Total de parcelas"><input type="number" min="1" max="120" value={form.installment_total} onChange={setInstallmentTotal} readOnly={Boolean(nextFrom)} required /></Field>
             <Field label="Periodicidade"><select value={form.installment_frequency} onChange={setFrequency}>{INSTALLMENT_FREQUENCIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-            {!settled && <Field label="Vencimento da próxima"><input type="date" value={form.next_installment_due_date} onChange={set('next_installment_due_date')} required /></Field>}
+            {!settled && (sale || nextFrom) && <Field label="Vencimento da próxima"><input type="date" value={form.next_installment_due_date} onChange={set('next_installment_due_date')} required /></Field>}
             <label style={{ ...checkStyle, minHeight: 42 }}><input type="checkbox" checked={settled} disabled={finalInstallment} onChange={(event) => setForm((previous) => ({ ...previous, is_settlement: event.target.checked }))} /> Quitação</label>
+          </div>}
+          {!sale && !nextFrom && hasInstallment && !settled && Number(form.installment_number) === 1 && <div style={{ width: '100%', marginTop: 12 }}>
+            <div style={{ ...muted, marginBottom: 8 }}>Informe o valor e o vencimento de cada cobrança. Esses valores são previsões e só entram no faturamento quando o pagamento for confirmado.</div>
+            <div style={{ display: 'grid', gap: 8, maxHeight: 260, overflowY: 'auto' }}>
+              {futureSchedule.map((item) => <div key={item.installment_number} style={scheduleEditorRow}>
+                <strong style={{ gridColumn: '1 / -1', fontSize: 12, color: '#334155' }}>Parcela {item.installment_number}/{form.installment_total}</strong>
+                <Field label="Vencimento *"><input aria-label={`Vencimento da parcela ${item.installment_number}`} type="date" value={item.due_date} onChange={setScheduleField(item.installment_number, 'due_date')} required /></Field>
+                <Field label="Valor previsto (R$) *"><input aria-label={`Valor previsto da parcela ${item.installment_number}`} type="number" step="0.01" min="0.01" value={item.expected_amount} onChange={setScheduleField(item.installment_number, 'expected_amount')} required /></Field>
+              </div>)}
+            </div>
           </div>}
         </div>
         <div style={commissionInfo}>
@@ -415,6 +459,7 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
     next_installment_due_date: String(installment.next_installment_due_date || '').substring(0, 10),
     next_installment_amount: installment.pending_amount ?? installment.amount ?? '',
     installment_frequency: installment.installment_frequency || 'monthly',
+    installment_number: installment.next_installment_number,
   });
   const set = (key) => (event) => setForm((previous) => ({ ...previous, [key]: event.target.value }));
 
@@ -434,6 +479,7 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
           next_installment_due_date: form.next_installment_due_date,
           next_installment_amount: Number(form.next_installment_amount),
           installment_frequency: form.installment_frequency,
+          installment_number: form.installment_number,
         });
         if (!succeeded) setSubmitting(false);
       }}>
@@ -446,8 +492,8 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
           <Field label="Valor previsto (R$) *"><input type="number" step="0.01" min="0.01" value={form.next_installment_amount} onChange={set('next_installment_amount')} required /></Field>
         </div>
         <div className="form-row">
-          <Field label="Periodicidade *"><select value={form.installment_frequency} onChange={set('installment_frequency')}>{INSTALLMENT_FREQUENCIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
           <Field label="Parcela"><input value={`${installment.next_installment_number}/${installment.installment_total}`} readOnly /></Field>
+          <Field label="Periodicidade"><input value={installmentFrequencyLabel(form.installment_frequency)} readOnly /></Field>
         </div>
         <div style={paymentConfirmationInfo}><strong>Importante:</strong> salvar aqui não soma valor ao faturamento. A receita só será lançada em “Confirmar pagamento”.</div>
         <div className="form-actions"><button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>Cancelar</button><button type="submit" className="btn-primary" disabled={submitting}>{submitting ? 'Salvando...' : 'Salvar cobrança'}</button></div>
@@ -487,6 +533,24 @@ function nextDateAfter(value, frequency) {
   const lastDay = new Date(year, month + 1, 0).getDate();
   return localIsoDateFor(new Date(year, month, Math.min(day, lastDay), 12));
 }
+function createFutureSchedule(total, firstDueDate, frequency, existing = []) {
+  const count = Math.max(0, Math.min(Number(total || 1) - 1, 119));
+  const previous = new Map((existing || []).map((item) => [Number(item.installment_number), item]));
+  const rows = [];
+  let dueDate = firstDueDate || '';
+  for (let index = 0; index < count; index += 1) {
+    const installmentNumber = index + 2;
+    const old = previous.get(installmentNumber);
+    const suggestedDate = frequency === 'manual' ? (old?.due_date || '') : (old?.due_date || dueDate);
+    rows.push({
+      installment_number: installmentNumber,
+      due_date: suggestedDate,
+      expected_amount: old?.expected_amount ?? '',
+    });
+    dueDate = suggestedDate ? nextDateAfter(suggestedDate, frequency) : '';
+  }
+  return rows;
+}
 function localIsoDateFor(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function Loading() { return <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 0', gap: 14 }}><div className="loading-spinner" style={{ width: 32, height: 32, border: '3px solid #e2e8f0', borderTopColor: '#751518' }} /><p style={{ color: '#94a3b8', fontSize: 14 }}>Carregando quadro de vendas...</p></div>; }
 
@@ -498,6 +562,7 @@ const subtitleStyle = { fontSize: 13, color: '#64748b', margin: '3px 0 0' };
 const muted = { color: '#64748b', fontSize: 12 };
 const warningBadge = { background: '#fff7ed', color: '#c2410c', borderRadius: 999, padding: '4px 9px', fontSize: 11, fontWeight: 650 };
 const installmentCard = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 9, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: 'wrap' };
+const scheduleEditorRow = { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10, alignItems: 'end', border: '1px solid #e2e8f0', borderRadius: 8, padding: 9, background: '#fff' };
 const checkStyle = { display: 'flex', alignItems: 'center', gap: 8, color: '#334155', fontSize: 13, fontWeight: 650 };
 const commissionInfo = { background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 9, padding: '11px 13px' };
 const paymentConfirmationInfo = { background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e3a8a', borderRadius: 9, padding: '10px 12px', fontSize: 12 };

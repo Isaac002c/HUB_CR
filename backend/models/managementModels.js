@@ -1118,38 +1118,30 @@ async function getInstallmentFollowUps(tenantId, {
           AND s.installment_plan_id IS NOT NULL
           AND s.installment_total IS NOT NULL
      ), open_plans AS (
-       SELECT *
-         FROM scoped
+       SELECT * FROM scoped
         WHERE row_number = 1
           AND NOT is_settlement
           AND installment_number < installment_total
-     ), projected AS (
+     ), scheduled AS (
        SELECT open_plans.*,
-              installment_number + schedule.position AS next_installment_number,
-              schedule.position = 1 AS is_next_installment,
-              CASE COALESCE(installment_frequency, 'monthly')
-                WHEN 'weekly' THEN next_installment_due_date + ((schedule.position - 1) * 7)
-                WHEN 'monthly' THEN (next_installment_due_date + make_interval(months => schedule.position - 1))::date
-                ELSE next_installment_due_date
-              END AS projected_due_date
+              item.installment_number AS next_installment_number,
+              item.installment_number = open_plans.installment_number + 1 AS is_next_installment,
+              item.due_date AS projected_due_date,
+              item.expected_amount AS pending_amount
          FROM open_plans
-         CROSS JOIN LATERAL generate_series(
-           1,
-           CASE WHEN COALESCE(installment_frequency, 'monthly') = 'manual'
-             THEN 1
-             ELSE installment_total - installment_number
-           END
-         ) AS schedule(position)
+         JOIN sales_installment_schedule item
+           ON item.tenant_id = open_plans.tenant_id
+          AND item.installment_plan_id = open_plans.installment_plan_id
+          AND item.status = 'scheduled'
      )
-     SELECT projected.*,
-             projected_due_date AS next_installment_due_date,
-            COALESCE(projected.next_installment_amount, projected.amount) AS pending_amount,
-             CASE
-               WHEN projected_due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date THEN 'overdue'
-               WHEN projected_due_date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date THEN 'due_today'
-               ELSE 'upcoming'
-             END AS follow_up_status
-       FROM projected
+     SELECT scheduled.*,
+            projected_due_date AS next_installment_due_date,
+            CASE
+              WHEN projected_due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date THEN 'overdue'
+              WHEN projected_due_date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date THEN 'due_today'
+              ELSE 'upcoming'
+            END AS follow_up_status
+       FROM scheduled
       WHERE (
         projected_due_date >= $${periodStartIndex}::date
         AND projected_due_date < $${periodEndIndex}::date
@@ -1230,17 +1222,38 @@ async function updateInstallmentSchedule(planId, data, tenantId) {
   if (latest.is_settlement || Number(latest.installment_number) >= Number(latest.installment_total)) {
     throw domainError('Esse parcelamento já está quitado.', 'INVALID_INSTALLMENT_PLAN');
   }
-  const result = await pool.query(
-    `UPDATE sales
-        SET next_installment_due_date = $1,
-            next_installment_amount = $2,
-            installment_frequency = $3,
-            updated_at = NOW()
-      WHERE id = $4 AND tenant_id = $5
-      RETURNING *`,
-    [data.next_installment_due_date, data.next_installment_amount, data.installment_frequency, latest.id, tenantId]
+  const installmentNumber = Number(data.installment_number || (Number(latest.installment_number) + 1));
+  const neighbors = await pool.query(
+    `SELECT MAX(due_date) FILTER (WHERE installment_number < $3) AS previous_due_date,
+            MIN(due_date) FILTER (WHERE installment_number > $3) AS following_due_date
+       FROM sales_installment_schedule
+      WHERE tenant_id = $1 AND installment_plan_id = $2 AND status <> 'cancelled'`,
+    [tenantId, planId, installmentNumber]
   );
-  return result.rows[0] || null;
+  const previousDueDate = neighbors.rows[0]?.previous_due_date;
+  const followingDueDate = neighbors.rows[0]?.following_due_date;
+  const dateOnly = (value) => value instanceof Date ? value.toISOString().substring(0, 10) : String(value || '').substring(0, 10);
+  if ((previousDueDate && String(data.next_installment_due_date) <= dateOnly(previousDueDate))
+    || (followingDueDate && String(data.next_installment_due_date) >= dateOnly(followingDueDate))) {
+    throw domainError('O vencimento deve ficar entre as demais parcelas do plano.', 'INVALID_INSTALLMENT_DUE_DATE');
+  }
+  const result = await pool.query(
+    `UPDATE sales_installment_schedule
+        SET due_date = $1, expected_amount = $2, updated_at = NOW()
+      WHERE tenant_id = $3 AND installment_plan_id = $4
+        AND installment_number = $5 AND status = 'scheduled'
+      RETURNING *`,
+    [data.next_installment_due_date, data.next_installment_amount, tenantId, planId, installmentNumber]
+  );
+  if (!result.rowCount) throw domainError('Esta cobrança já foi paga ou não está mais programada.', 'INVALID_INSTALLMENT_PLAN');
+  if (installmentNumber === Number(latest.installment_number) + 1) {
+    await pool.query(
+      `UPDATE sales SET next_installment_due_date = $1, next_installment_amount = $2, updated_at = NOW()
+        WHERE id = $3 AND tenant_id = $4`,
+      [data.next_installment_due_date, data.next_installment_amount, latest.id, tenantId]
+    );
+  }
+  return { ...latest, next_installment_due_date: data.next_installment_due_date, next_installment_amount: data.next_installment_amount };
 }
 
 function addInstallmentPeriod(dateText, frequency) {
@@ -1313,49 +1326,158 @@ async function createSale(data) {
   let resolvedFrequency = installment_total ? (installment_frequency || 'monthly') : null;
   let resolvedNextDueDate = settled ? null : next_installment_due_date;
   let resolvedNextAmount = settled ? null : (next_installment_amount ?? amount);
+  const explicitSchedule = Array.isArray(data.installment_schedule) ? data.installment_schedule : null;
+  let scheduleRows = [];
 
-  if (installment_total && resolvedPlanId && Number(installment_number) > 1) {
-    const latest = await getLatestInstallmentPlanRow(tenant_id, resolvedPlanId, seller_id);
-    if (!latest) throw domainError('Parcelamento não encontrado para esse responsável.', 'INVALID_INSTALLMENT_PLAN');
-    if (Number(installment_number) !== Number(latest.installment_number) + 1) {
-      throw domainError('Essa parcela já foi recebida ou existe uma parcela anterior pendente.', 'INVALID_INSTALLMENT_SEQUENCE');
-    }
-    if (Number(installment_total) !== Number(latest.installment_total)) {
-      throw domainError('O total de parcelas não corresponde ao parcelamento.', 'INVALID_INSTALLMENT_SEQUENCE');
-    }
-    resolvedFrequency = installment_frequency || latest.installment_frequency || 'monthly';
-    if (!settled) {
-      resolvedNextDueDate = resolvedFrequency === 'manual'
-        ? next_installment_due_date
-        : addInstallmentPeriod(latest.next_installment_due_date, resolvedFrequency);
-      if (!resolvedNextDueDate) {
-        throw domainError('Informe o próximo vencimento do parcelamento.', 'INVALID_INSTALLMENT_DUE_DATE');
+  if (installment_total && Number(installment_number) === 1 && !settled) {
+    if (explicitSchedule) {
+      scheduleRows = explicitSchedule.map((item) => ({
+        installment_number: Number(item.installment_number),
+        due_date: String(item.due_date).substring(0, 10),
+        expected_amount: Number(item.expected_amount),
+      }));
+      if (scheduleRows.length !== Number(installment_total) - 1
+        || scheduleRows.some((item, index) => item.installment_number !== index + 2
+          || !item.due_date || !Number.isFinite(item.expected_amount) || item.expected_amount <= 0)
+        || scheduleRows.some((item, index) => index > 0 && item.due_date < scheduleRows[index - 1].due_date)) {
+        throw domainError('A agenda precisa conter todas as parcelas futuras, em ordem.', 'VALIDATION');
       }
-      resolvedNextAmount = next_installment_amount ?? latest.next_installment_amount ?? amount;
+    } else if (resolvedNextDueDate) {
+      let dueDate = String(resolvedNextDueDate).substring(0, 10);
+      const count = resolvedFrequency === 'manual' ? 1 : Number(installment_total) - 1;
+      for (let offset = 0; offset < count; offset += 1) {
+        scheduleRows.push({
+          installment_number: offset + 2,
+          due_date: dueDate,
+          expected_amount: Number(resolvedNextAmount || amount),
+        });
+        if (offset + 1 < count) dueDate = addInstallmentPeriod(dueDate, resolvedFrequency);
+      }
+    }
+    if (scheduleRows.length) {
+      resolvedNextDueDate = scheduleRows[0].due_date;
+      resolvedNextAmount = scheduleRows[0].expected_amount;
     }
   }
 
-  const r = await pool.query(
-    `INSERT INTO sales
-       (tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name_snapshot, supervisor_id,
-        client_id, company_id, lead_id, fine_id,
-        description, customer_name, service_name, installment_number, installment_total,
-         installment_plan_id, installment_frequency, next_installment_due_date, next_installment_amount, is_settlement,
-         payment_method, closing_method, amount, commission_percentage,
-         commissionable_amount, commission_trigger_amount, commission_amount, status,
-         closed_at, source, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-             COALESCE($29, CURRENT_DATE), 'manual', $30)
-     RETURNING *`,
-    [tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name || seller.name, supervisor_id,
-     client_id, company_id, lead_id, fine_id,
-     description, customer_name, service_name, installment_number, installment_total,
-     resolvedPlanId, resolvedFrequency, resolvedNextDueDate, resolvedNextAmount, settled,
-     payment_method, closing_method, amount, commission_percentage,
-     commissionable_amount, commission_trigger_amount, commission_amount, status,
-     closed_at, created_by]
-  );
-  return r.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let scheduledPayment = null;
+    if (installment_total && Number(installment_number) > 1) {
+      const latestResult = await client.query(
+        `SELECT * FROM sales
+          WHERE tenant_id = $1 AND installment_plan_id = $2 AND seller_id = $3
+          ORDER BY installment_number DESC, closed_at DESC, created_at DESC
+          LIMIT 1 FOR UPDATE`,
+        [tenant_id, resolvedPlanId, seller_id]
+      );
+      const latest = latestResult.rows[0];
+      if (!latest) throw domainError('Parcelamento não encontrado para esse responsável.', 'INVALID_INSTALLMENT_PLAN');
+      if (Number(installment_number) !== Number(latest.installment_number) + 1) {
+        throw domainError('Essa parcela já foi recebida ou existe uma parcela anterior pendente.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      if (Number(installment_total) !== Number(latest.installment_total)) {
+        throw domainError('O total de parcelas não corresponde ao parcelamento.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      resolvedFrequency = latest.installment_frequency || resolvedFrequency || 'monthly';
+      const scheduledResult = await client.query(
+        `SELECT * FROM sales_installment_schedule
+          WHERE tenant_id = $1 AND installment_plan_id = $2 AND installment_number = $3
+            AND status = 'scheduled'
+          FOR UPDATE`,
+        [tenant_id, resolvedPlanId, installment_number]
+      );
+      scheduledPayment = scheduledResult.rows[0];
+      if (!scheduledPayment) {
+        throw domainError('A parcela não está mais programada. Atualize a tela e tente novamente.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      if (!settled) {
+        const following = await client.query(
+          `SELECT * FROM sales_installment_schedule
+            WHERE tenant_id = $1 AND installment_plan_id = $2 AND installment_number = $3
+              AND status = 'scheduled'`,
+          [tenant_id, resolvedPlanId, Number(installment_number) + 1]
+        );
+        if (following.rowCount) {
+          resolvedNextDueDate = following.rows[0].due_date;
+          resolvedNextAmount = following.rows[0].expected_amount;
+        } else {
+          // Compatibilidade defensiva para agenda legada incompleta.
+          resolvedNextDueDate = resolvedFrequency === 'manual'
+            ? (next_installment_due_date || null)
+            : addInstallmentPeriod(scheduledPayment.due_date, resolvedFrequency);
+          resolvedNextAmount = next_installment_amount ?? scheduledPayment.expected_amount;
+          if (resolvedNextDueDate && Number(installment_number) + 1 <= Number(installment_total)) {
+            await client.query(
+              `INSERT INTO sales_installment_schedule
+                 (tenant_id, installment_plan_id, installment_number, installment_total, due_date, expected_amount, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT (tenant_id, installment_plan_id, installment_number) DO NOTHING`,
+              [tenant_id, resolvedPlanId, Number(installment_number) + 1, installment_total, resolvedNextDueDate, resolvedNextAmount, created_by]
+            );
+          }
+        }
+      } else {
+        resolvedNextDueDate = null;
+        resolvedNextAmount = null;
+      }
+    }
+
+    const saleResult = await client.query(
+      `INSERT INTO sales
+         (tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name_snapshot, supervisor_id,
+          client_id, company_id, lead_id, fine_id,
+          description, customer_name, service_name, installment_number, installment_total,
+           installment_plan_id, installment_frequency, next_installment_due_date, next_installment_amount, is_settlement,
+           payment_method, closing_method, amount, commission_percentage,
+           commissionable_amount, commission_trigger_amount, commission_amount, status,
+           closed_at, source, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
+               COALESCE($29, CURRENT_DATE), 'manual', $30)
+       RETURNING *`,
+      [tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name || seller.name, supervisor_id,
+       client_id, company_id, lead_id, fine_id,
+       description, customer_name, service_name, installment_number, installment_total,
+       resolvedPlanId, resolvedFrequency, resolvedNextDueDate, resolvedNextAmount, settled,
+       payment_method, closing_method, amount, commission_percentage,
+       commissionable_amount, commission_trigger_amount, commission_amount, status,
+       closed_at, created_by]
+    );
+    const sale = saleResult.rows[0];
+
+    if (installment_total && Number(installment_number) === 1 && !settled) {
+      for (const item of scheduleRows) {
+        await client.query(
+          `INSERT INTO sales_installment_schedule
+             (tenant_id, installment_plan_id, installment_number, installment_total, due_date, expected_amount, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [tenant_id, resolvedPlanId, item.installment_number, installment_total, item.due_date, item.expected_amount, created_by]
+        );
+      }
+    }
+    if (scheduledPayment) {
+      await client.query(
+        `UPDATE sales_installment_schedule SET status = 'paid', paid_sale_id = $1, updated_at = NOW()
+          WHERE id = $2`,
+        [sale.id, scheduledPayment.id]
+      );
+      if (settled) {
+        await client.query(
+          `UPDATE sales_installment_schedule SET status = 'cancelled', updated_at = NOW()
+            WHERE tenant_id = $1 AND installment_plan_id = $2 AND installment_number > $3 AND status = 'scheduled'`,
+          [tenant_id, resolvedPlanId, installment_number]
+        );
+      }
+    }
+    await client.query('COMMIT');
+    return sale;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 // Atualiza venda. NÃO recalcula comissão histórica por mudança futura da regra:
@@ -1458,8 +1580,61 @@ async function updateSale(id, data, tenantId) {
 }
 
 async function deleteSale(id, tenantId) {
-  const r = await pool.query(`DELETE FROM sales WHERE id = $1 AND tenant_id = $2 RETURNING id`, [id, tenantId]);
-  return r.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const currentResult = await client.query(
+      `SELECT * FROM sales WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [id, tenantId]
+    );
+    const current = currentResult.rows[0];
+    if (!current) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    if (current.installment_plan_id && current.installment_number) {
+      const later = await client.query(
+        `SELECT 1 FROM sales
+          WHERE tenant_id = $1 AND installment_plan_id = $2
+            AND installment_number > $3
+          LIMIT 1`,
+        [tenantId, current.installment_plan_id, current.installment_number]
+      );
+      if (later.rowCount) {
+        throw domainError('Exclua as parcelas na ordem inversa, começando pela mais recente.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      if (Number(current.installment_number) > 1) {
+        await client.query(
+          `UPDATE sales_installment_schedule
+              SET status = 'scheduled', paid_sale_id = NULL, updated_at = NOW()
+            WHERE tenant_id = $1 AND installment_plan_id = $2
+              AND installment_number = $3 AND status = 'paid'`,
+          [tenantId, current.installment_plan_id, current.installment_number]
+        );
+        await client.query(
+          `UPDATE sales_installment_schedule SET status = 'scheduled', updated_at = NOW()
+            WHERE tenant_id = $1 AND installment_plan_id = $2
+              AND installment_number > $3 AND status = 'cancelled'`,
+          [tenantId, current.installment_plan_id, current.installment_number]
+        );
+      } else {
+        await client.query(
+          `UPDATE sales_installment_schedule SET status = 'cancelled', updated_at = NOW()
+            WHERE tenant_id = $1 AND installment_plan_id = $2 AND status = 'scheduled'`,
+          [tenantId, current.installment_plan_id]
+        );
+      }
+    }
+    const deleted = await client.query(
+      `DELETE FROM sales WHERE id = $1 AND tenant_id = $2 RETURNING id`, [id, tenantId]
+    );
+    await client.query('COMMIT');
+    return deleted.rows[0] || null;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = {

@@ -164,6 +164,7 @@ function saleCommercialFields(body, { partial = false } = {}) {
   const hasTracking = hasInstallment
     || body.installment_plan_id !== undefined
     || body.next_installment_due_date !== undefined
+    || body.installment_schedule !== undefined
     || body.is_settlement !== undefined
     || body.installment_frequency !== undefined;
   let installmentNumber = null, installmentTotal = null;
@@ -198,12 +199,49 @@ function saleCommercialFields(body, { partial = false } = {}) {
     result.installment_plan_id = installmentTotal ? planId : null;
     result.installment_frequency = frequency;
     result.is_settlement = installmentTotal ? settlement : false;
-    if (installmentTotal && !settlement && frequency === 'manual' && !requestedDueDate) {
+    if (installmentTotal && !settlement && frequency === 'manual' && !requestedDueDate
+      && body.installment_schedule === undefined) {
       throw Object.assign(new Error('Informe o próximo vencimento para a periodicidade manual.'), { code: 'VALIDATION' });
     }
     result.next_installment_due_date = installmentTotal && !settlement
       ? (requestedDueDate || (planId ? null : (frequency === 'weekly' ? oneWeekAfter(body.closed_at) : oneMonthAfter(body.closed_at))))
       : null;
+    if (body.installment_schedule !== undefined) {
+      if (!installmentTotal || installmentNumber !== 1) {
+        throw Object.assign(new Error('A agenda completa deve ser informada ao registrar a primeira parcela.'), { code: 'VALIDATION' });
+      }
+      if (!Array.isArray(body.installment_schedule)) {
+        throw Object.assign(new Error('Informe a agenda de parcelas em formato válido.'), { code: 'VALIDATION' });
+      }
+      const schedule = body.installment_schedule.map((item) => {
+        const installmentNumber = Number(item?.installment_number);
+        const dueDate = cleanText(item?.due_date, 'Vencimento da parcela', 10);
+        const expectedAmount = Number(item?.expected_amount);
+        const parsedDate = dueDate && /^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+          ? new Date(`${dueDate}T12:00:00Z`)
+          : null;
+        if (!Number.isInteger(installmentNumber) || installmentNumber < 2
+          || !dueDate || !parsedDate || Number.isNaN(parsedDate.getTime())
+          || parsedDate.toISOString().substring(0, 10) !== dueDate
+          || !Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+          throw Object.assign(new Error('Revise o vencimento e o valor previsto de cada parcela.'), { code: 'VALIDATION' });
+        }
+        return { installment_number: installmentNumber, due_date: dueDate, expected_amount: expectedAmount };
+      });
+      const expectedCount = installmentTotal && !settlement
+        ? installmentTotal - installmentNumber
+        : 0;
+      if (schedule.length !== expectedCount
+        || schedule.some((item, index) => item.installment_number !== installmentNumber + index + 1)
+        || schedule.some((item, index) => index > 0 && item.due_date < schedule[index - 1].due_date)) {
+        throw Object.assign(new Error('Preencha, em ordem, todas as parcelas futuras com seus valores e vencimentos.'), { code: 'VALIDATION' });
+      }
+      result.installment_schedule = schedule;
+      if (schedule.length) {
+        result.next_installment_due_date = schedule[0].due_date;
+        result.next_installment_amount = schedule[0].expected_amount;
+      }
+    }
   }
   if (!partial || body.payment_method !== undefined) result.payment_method = paymentMethod;
   if (!partial || body.closing_method !== undefined) result.closing_method = closingMethod;
@@ -227,7 +265,12 @@ function installmentScheduleFields(body) {
   if (!frequency || !INSTALLMENT_FREQUENCIES.has(frequency)) {
     throw Object.assign(new Error('Periodicidade inválida.'), { code: 'VALIDATION' });
   }
+  const installmentNumber = body.installment_number === undefined ? null : Number(body.installment_number);
+  if (installmentNumber !== null && (!Number.isInteger(installmentNumber) || installmentNumber < 2 || installmentNumber > 120)) {
+    throw Object.assign(new Error('Número da parcela inválido.'), { code: 'VALIDATION' });
+  }
   return {
+    installment_number: installmentNumber,
     next_installment_due_date: dueDate,
     next_installment_amount: amount,
     installment_frequency: frequency,
@@ -1170,7 +1213,7 @@ router.delete('/sales/:id', requireRole('master', 'admin', 'supervisor'), async 
     await logActivity({ tenant_id: req.tenantId, user_id: req.userId, action: 'delete', entity_type: 'sale', entity_id: req.params.id, description: 'Venda excluída/cancelada' });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return mutationError(res, err, 'sales/delete');
   }
 });
 

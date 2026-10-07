@@ -68,6 +68,7 @@ const migrations = [
   'gestao_27_installment_schedule_amount.sql',
   'gestao_28_cpf_duplicate_guard.sql',
   'gestao_29_business_day_deadlines.sql',
+  'gestao_30_installment_schedule_items.sql',
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
