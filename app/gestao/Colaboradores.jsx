@@ -151,7 +151,7 @@ function OverviewTab({ detail, canManage }) {
   const fixed = Number(person.salary || 0) + Number(person.benefits_amount || 0) + Number(person.other_monthly_costs || 0) + Number(person.employer_charges || 0) + Number(person.thirteenth_provision || 0);
   return <div style={stack}>
     <div className="kpi-grid management-kpi-grid" style={{ marginBottom: 0 }}><Kpi label="Vendido na competência" value={formatBRL(current.total_amount)} cls="success" /><Kpi label="Meta mensal" value={current.target_configured ? formatBRL(current.target_amount) : 'Não definida'} cls="primary" /><Kpi label="Falta para a meta" value={current.target_configured ? formatBRL(current.target_remaining) : '—'} /><Kpi label="Comissão gerada" value={formatBRL(current.total_commission)} cls="warning" /></div>
-    {canManage && <div style={summaryGrid}><SummaryItem label="Salário base" value={formatBRL(person.salary)} /><SummaryItem label="Custos fixos e provisões" value={formatBRL(fixed - Number(person.salary || 0))} /><SummaryItem label="Regra pessoal" value={String(person.role || '').toLowerCase() === 'supervisor' ? `${SUPERVISOR_PERSONAL_PERCENTAGE}% sobre vendas próprias` : `${FIXED_COMMISSION_PERCENTAGE}% acima de ${formatBRL(FIXED_COMMISSION_THRESHOLD)}`} /><SummaryItem label="Percentual" value={`${Number(person.commission_percentage || 0)}%`} /></div>}
+    {canManage && <div style={summaryGrid}><SummaryItem label="Salário base" value={formatBRL(person.salary)} /><SummaryItem label="Custos fixos e provisões" value={formatBRL(fixed - Number(person.salary || 0))} /><SummaryItem label="Regra pessoal" value={commissionRuleLabel(person)} /><SummaryItem label="Percentual" value={`${Number(person.commission_percentage || 0)}%`} /></div>}
     <div style={sectionCard}><div style={sectionHead}><span style={cardTitle}>Últimas vendas</span><span style={muted}>{detail.recentSales.length} registro(s)</span></div><div style={{ overflowX: 'auto' }}><table className="data-table" style={{ border: 'none' }}><thead><tr><th>Data</th><th>Cliente</th><th>Serviço</th><th style={right}>Valor pago</th><th style={right}>% aplicado</th><th style={right}>Base comissionável</th><th style={right}>Comissão</th></tr></thead><tbody>{detail.recentSales.map((sale) => <tr key={sale.id}><td>{formatDate(sale.closed_at)}</td><td>{sale.customer_name || '—'}</td><td>{sale.service_name || sale.description || 'Venda'}</td><td style={right}>{formatBRL(sale.amount)}</td><td style={right}>{Number(sale.commission_percentage || 0)}%</td><td style={right}>{formatBRL(sale.commissionable_amount)}</td><td style={{ ...right, color: '#15803d', fontWeight: 700 }}>{formatBRL(sale.commission_amount)}</td></tr>)}{detail.recentSales.length === 0 && <tr><td colSpan={7} style={emptyStyle}>Ainda não há vendas.</td></tr>}</tbody></table></div></div>
   </div>;
 }
@@ -205,25 +205,41 @@ function CostEditor({ collaboratorId, mode, cost, onCancel, onSave }) {
 
 function CommissionTab({ detail }) {
   const current = detail.current || {};
+  const person = detail.collaborator || {};
   const sold = Number(current.total_amount || 0);
-  const isSupervisor = String(detail.collaborator?.role || '').toLowerCase() === 'supervisor';
+  const isSupervisor = String(person.role || '').toLowerCase() === 'supervisor';
   if (isSupervisor) return <div style={stack}>
     <div className="kpi-grid management-kpi-grid" style={{ marginBottom: 0 }}><Kpi label="Percentual pessoal" value={`${SUPERVISOR_PERSONAL_PERCENTAGE}%`} /><Kpi label="Vendas pessoais" value={formatBRL(sold)} cls="primary" /><Kpi label="Comissão pessoal" value={formatBRL(current.total_commission)} cls="warning" /></div>
     <div style={infoBox}>As vendas pessoais da supervisão recebem {SUPERVISOR_PERSONAL_PERCENTAGE}% sobre o valor integral. A comissão adicional de 5% da equipe é exibida somente no painel da supervisão e não inclui estas vendas pessoais.</div>
   </div>;
-  const progress = Math.min((sold / FIXED_COMMISSION_THRESHOLD) * 100, 100);
-  const thresholdReached = sold >= FIXED_COMMISSION_THRESHOLD;
+  const percentage = Number(person.commission_percentage ?? FIXED_COMMISSION_PERCENTAGE);
+  const threshold = Number(person.commission_threshold ?? FIXED_COMMISSION_THRESHOLD);
+  if (threshold === 0) return <div style={stack}>
+    <div className="kpi-grid management-kpi-grid" style={{ marginBottom: 0 }}><Kpi label="Percentual pessoal" value={`${percentage}%`} /><Kpi label="Vendido na competência" value={formatBRL(sold)} cls="primary" /><Kpi label="Gatilho mínimo" value="Desde a 1ª venda" cls="success" /><Kpi label="Comissão no mês" value={formatBRL(current.total_commission)} cls="warning" /></div>
+    <div style={infoBox}>{percentage}% sobre o valor integral das vendas, desde a primeira venda. As vendas não entram no cálculo de comissão da supervisão. Cada venda mantém o percentual e a base como snapshot auditável.</div>
+  </div>;
+  const progress = Math.min((sold / threshold) * 100, 100);
+  const thresholdReached = sold >= threshold;
   return <div style={stack}>
-    <div className="kpi-grid management-kpi-grid" style={{ marginBottom: 0 }}><Kpi label="Percentual fixo" value={`${FIXED_COMMISSION_PERCENTAGE}%`} /><Kpi label="Gatilho fixo" value={formatBRL(FIXED_COMMISSION_THRESHOLD)} cls="primary" /><Kpi label="Falta para comissionar" value={formatBRL(current.threshold_remaining)} cls="success" /><Kpi label="Comissão no mês" value={formatBRL(current.total_commission)} cls="warning" /></div>
-    <div style={infoBox}>A comissão é fixa em {FIXED_COMMISSION_PERCENTAGE}% sobre o valor vendido que exceder {formatBRL(FIXED_COMMISSION_THRESHOLD)} no mês. Abaixo do gatilho, a comissão é zero. Cada venda mantém o percentual e a base como snapshot auditável.</div>
+    <div className="kpi-grid management-kpi-grid" style={{ marginBottom: 0 }}><Kpi label="Percentual fixo" value={`${percentage}%`} /><Kpi label="Gatilho fixo" value={formatBRL(threshold)} cls="primary" /><Kpi label="Falta para comissionar" value={formatBRL(current.threshold_remaining)} cls="success" /><Kpi label="Comissão no mês" value={formatBRL(current.total_commission)} cls="warning" /></div>
+    <div style={infoBox}>A comissão é fixa em {percentage}% sobre o valor vendido que exceder {formatBRL(threshold)} no mês. Abaixo do gatilho, a comissão é zero. Cada venda mantém o percentual e a base como snapshot auditável.</div>
     <div style={progressCard}><div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}><div><strong>{thresholdReached ? 'Gatilho atingido' : 'Progresso até o gatilho'}</strong><div style={muted}>{thresholdReached ? `${formatBRL(sold)} vendidos no mês` : `Faltam ${formatBRL(current.threshold_remaining)} para iniciar a comissão`}</div></div><strong>{progress.toFixed(0)}%</strong></div><div style={progressTrack}><div style={{ ...progressFill, width: `${progress}%` }} /></div></div>
-    {thresholdReached && <div style={successBox}>As próximas vendas do mês geram {FIXED_COMMISSION_PERCENTAGE}% de comissão sobre todo o valor vendido.</div>}
+    {thresholdReached && <div style={successBox}>As próximas vendas do mês geram {percentage}% de comissão sobre o valor que exceder o gatilho.</div>}
   </div>;
 }
 
 function AdminTab({ person, teams, people, open, setOpen, onSave }) {
-  if (!open) return <div style={stack}><div style={infoBox}>A identidade e o acesso do usuário não são alterados aqui. Esta aba administra cargo, vínculo e remuneração. As metas são históricas e ficam na aba “Meta mensal”.</div><div style={summaryGrid}><SummaryItem label="Cargo" value={person.position || 'Não informado'} /><SummaryItem label="Equipe" value={person.team_name || 'Sem equipe'} /><SummaryItem label="Meta da competência" value={person.monthly_target_configured ? formatBRL(person.monthly_sales_target) : 'Não definida'} /><SummaryItem label="Regra de comissão" value={String(person.role || '').toLowerCase() === 'supervisor' ? `${SUPERVISOR_PERSONAL_PERCENTAGE}% sobre vendas próprias` : `${FIXED_COMMISSION_PERCENTAGE}% acima de ${formatBRL(FIXED_COMMISSION_THRESHOLD)}`} /></div><button className="btn-primary" style={{ alignSelf: 'flex-start' }} onClick={() => setOpen(true)}>Editar administração</button></div>;
+  if (!open) return <div style={stack}><div style={infoBox}>A identidade e o acesso do usuário não são alterados aqui. Esta aba administra cargo, vínculo e remuneração. As metas são históricas e ficam na aba “Meta mensal”.</div><div style={summaryGrid}><SummaryItem label="Cargo" value={person.position || 'Não informado'} /><SummaryItem label="Equipe" value={person.team_name || 'Sem equipe'} /><SummaryItem label="Meta da competência" value={person.monthly_target_configured ? formatBRL(person.monthly_sales_target) : 'Não definida'} /><SummaryItem label="Regra de comissão" value={commissionRuleLabel(person)} /></div><button className="btn-primary" style={{ alignSelf: 'flex-start' }} onClick={() => setOpen(true)}>Editar administração</button></div>;
   return <AdminEditor person={person} teams={teams} people={people} onCancel={() => setOpen(false)} onSave={onSave} />;
+}
+
+function commissionRuleLabel(person) {
+  if (String(person.role || '').toLowerCase() === 'supervisor') return `${SUPERVISOR_PERSONAL_PERCENTAGE}% sobre vendas próprias`;
+  const percentage = Number(person.commission_percentage ?? FIXED_COMMISSION_PERCENTAGE);
+  const threshold = Number(person.commission_threshold ?? FIXED_COMMISSION_THRESHOLD);
+  return threshold === 0
+    ? `${percentage}% sobre o valor integral, desde a 1ª venda`
+    : `${percentage}% sobre o excedente de ${formatBRL(threshold)}`;
 }
 
 function AdminEditor({ person, teams, people, onCancel, onSave }) {

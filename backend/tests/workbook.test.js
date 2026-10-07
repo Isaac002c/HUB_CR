@@ -9,6 +9,9 @@ async function main() {
   }, {
     id: 'supervisor-1', name: 'Supervisora', role: 'supervisor', is_active: true,
     monthly_sales_target: 12000, commission_threshold: 0, commission_percentage: 10,
+  }, {
+    id: 'marketing-1', name: 'Larissa Marketing', role: 'seller', is_active: true,
+    monthly_sales_target: 0, commission_threshold: 0, commission_percentage: 5,
   }];
   const sales = [
     {
@@ -27,6 +30,11 @@ async function main() {
       customer_name: 'Cliente C', service_name: 'Recurso', amount: 8000,
       commission_percentage: 10, commission_amount: 800, payment_method: 'pix', closing_method: 'remoto',
     },
+    {
+      id: 'sale-4', seller_id: 'marketing-1', seller_name: 'Larissa Marketing', closed_at: '2026-08-16',
+      customer_name: 'Cliente D', service_name: 'Multa', amount: 1000,
+      commission_percentage: 5, commission_amount: 50, payment_method: 'pix', closing_method: 'remoto',
+    },
   ];
 
   const buffer = await buildSalesWorkbook({ sales, consultants, period: { month: 8, year: 2026 }, generalTarget: 50000 });
@@ -34,7 +42,7 @@ async function main() {
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
-  assert.deepStrictEqual(workbook.worksheets.map((sheet) => sheet.name), ['FATURAMENTO', 'Ana Luiza', 'Supervisora']);
+  assert.deepStrictEqual(workbook.worksheets.map((sheet) => sheet.name), ['FATURAMENTO', 'Ana Luiza', 'Supervisora', 'Larissa Marketing']);
 
   const general = workbook.getWorksheet('FATURAMENTO');
   assert(String(general.getCell('A1').value).includes('AGOSTO DE 2026'));
@@ -61,6 +69,11 @@ async function main() {
   assert.strictEqual(supervisor.getCell('D4').value, 8000);
   assert.strictEqual(supervisor.getCell('G4').value, 800);
   assert.strictEqual(supervisor.getCell('D20').value, 12000);
+
+  const marketing = workbook.getWorksheet('Larissa Marketing');
+  assert(String(marketing.getCell('A2').value).includes('Comissão: 5.00% sobre o valor integral, desde a 1ª venda'));
+  assert.strictEqual(marketing.getCell('F4').value, 0.05);
+  assert.strictEqual(marketing.getCell('G4').value, 50);
 
   const used = new Set();
   assert.strictEqual(safeSheetName('Ana/Luiza', used), 'Ana-Luiza');

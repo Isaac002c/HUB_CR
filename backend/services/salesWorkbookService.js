@@ -250,12 +250,16 @@ async function buildSalesWorkbook({ sales = [], consultants = [], period = {}, g
   activeConsultants.forEach((consultant) => {
     const consultantSales = sales.filter((sale) => sale.seller_id === consultant.id);
     const isSupervisor = String(consultant.role || '').toLowerCase() === 'supervisor';
+    const commissionPercentage = number(consultant.commission_percentage ?? (isSupervisor ? SUPERVISOR_PERSONAL_PERCENTAGE : FIXED_COMMISSION_PERCENTAGE));
+    const commissionThreshold = number(consultant.commission_threshold ?? FIXED_COMMISSION_THRESHOLD);
     const worksheet = workbook.addWorksheet(safeSheetName(consultant.name, usedNames));
     configureSheet(worksheet, {
       title: `CR RECURSOS — ${String(consultant.name || 'CONSULTOR').toUpperCase()} — ${periodLabel.toUpperCase()}`,
       subtitle: isSupervisor
         ? `Meta pessoal: R$ ${number(consultant.monthly_sales_target).toFixed(2)} · Comissão pessoal: ${SUPERVISOR_PERSONAL_PERCENTAGE.toFixed(2)}% sobre o valor integral`
-        : `Meta: R$ ${number(consultant.monthly_sales_target).toFixed(2)} · Comissão fixa: ${FIXED_COMMISSION_PERCENTAGE.toFixed(2)}% sobre o excedente de R$ ${FIXED_COMMISSION_THRESHOLD.toFixed(2)}`,
+        : commissionThreshold === 0
+          ? `Meta: R$ ${number(consultant.monthly_sales_target).toFixed(2)} · Comissão: ${commissionPercentage.toFixed(2)}% sobre o valor integral, desde a 1ª venda`
+          : `Meta: R$ ${number(consultant.monthly_sales_target).toFixed(2)} · Comissão fixa: ${commissionPercentage.toFixed(2)}% sobre o excedente de R$ ${commissionThreshold.toFixed(2)}`,
       sales: consultantSales,
       target: consultant.monthly_sales_target,
       includeConsultant: false,

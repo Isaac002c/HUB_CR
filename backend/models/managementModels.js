@@ -8,8 +8,6 @@
 const pool = require('../config/db');
 const { randomUUID } = require('crypto');
 const {
-  FIXED_COMMISSION_PERCENTAGE,
-  FIXED_COMMISSION_THRESHOLD,
   SUPERVISOR_PERSONAL_PERCENTAGE,
   SUPERVISOR_TEAM_PERCENTAGE,
   commissionPolicyForRole,
@@ -112,7 +110,7 @@ async function getRanking(tenantId, opts = {}) {
         seller.avatar         AS seller_avatar,
         s.team_id             AS team_id,
         t.name                AS team_name,
-        ${FIXED_COMMISSION_PERCENTAGE}::numeric AS commission_percentage,
+        COALESCE(MAX(s.commission_percentage), 0) AS commission_percentage,
         COUNT(*)                              AS sales_count,
         COALESCE(SUM(s.amount), 0)            AS total_amount,
         COALESCE(SUM(s.commission_amount), 0) AS total_commission,

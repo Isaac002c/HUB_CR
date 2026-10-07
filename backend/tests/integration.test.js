@@ -1010,6 +1010,8 @@ async function main() {
     service_name: 'Multa', amount: 1000, closed_at: supervisionDate,
     payment_method: 'pix', closing_method: 'presencial',
   });
+  const marketingRanking = await api('GET', `/api/management/ranking?month=${supervisionDate.slice(5, 7)}&year=${supervisionDate.slice(0, 4)}`, tok(master));
+  const marketingRankingRow = marketingRanking.json?.data?.ranking?.find((row) => row.seller_id === marketingSellerId);
   const marketingCollaborators = await api('GET', `/api/management/collaborators?month=${supervisionDate.slice(5, 7)}&year=${supervisionDate.slice(0, 4)}`, tok(master));
   const marketingCollaborator = marketingCollaborators.json?.data?.find((row) => row.id === marketingSellerId);
   const teamAfterMarketingSale = await api('GET', `/api/management/team/${teamA.id}?${supervisionQuery}`, tok(sup));
@@ -1028,6 +1030,9 @@ async function main() {
       && Number(marketingCollaborator.commission_threshold) === 0
       && marketingCollaborators.json?.data?.find((row) => row.id === metaSeller.id)?.commission_percentage === 10,
     JSON.stringify(marketingCollaborator));
+  check('ranking apresenta o percentual efetivamente aplicado às vendas de marketing',
+    marketingRanking.status === 200 && Number(marketingRankingRow?.commission_percentage) === 5,
+    JSON.stringify(marketingRankingRow));
 
   check('10. supervisor não acessa outra equipe por URL', (await api('GET', `/api/management/team/${createdTeam.json.data.id}?${supervisionQuery}`, tok(sup))).status === 403);
   const externalSalesProbe = await api('GET', `/api/management/sales?${supervisionQuery}&seller_id=${externalSeller.id}`, tok(sup));
