@@ -534,7 +534,7 @@ async function getCollaborators(tenantId, { teamId, monthStart, monthEnd, period
     params
   );
   return r.rows.map((row) => {
-    const policy = commissionPolicyForRole(row.role);
+    const policy = commissionPolicyForRole(row.role, row);
     return {
       ...row,
       monthly_sales_target: row.monthly_sales_target === null ? null : row.monthly_sales_target,
@@ -625,7 +625,7 @@ async function getCollaboratorById(userId, tenantId) {
     [userId, tenantId]
   );
   if (!r.rows[0]) return undefined;
-  const policy = commissionPolicyForRole(r.rows[0].role);
+  const policy = commissionPolicyForRole(r.rows[0].role, r.rows[0]);
   return {
     ...r.rows[0],
     commission_percentage: policy.percentage,
@@ -989,7 +989,7 @@ async function getCollaboratorDetail(collaboratorId, tenantId, { months = 12, mo
   const sold = Number(current.total_amount || 0);
   const target = selectedTargets[0] || {};
   const targetAmount = target.configured ? Number(target.amount || 0) : null;
-  const policy = commissionPolicyForRole(person.rows[0].role);
+  const policy = commissionPolicyForRole(person.rows[0].role, person.rows[0]);
   const collaborator = {
     ...person.rows[0],
     monthly_sales_target: targetAmount,
@@ -1020,7 +1020,8 @@ async function getCollaboratorDetail(collaboratorId, tenantId, { months = 12, mo
 async function getSellerCommissionPct(sellerId, tenantId, { amount = 0, closedAt = null, excludeSaleId = null } = {}) {
   if (!sellerId) return null;
   const r = await pool.query(
-    `SELECT u.id, u.name, LOWER(u.role) AS role, u.team_id, t.supervisor_id
+    `SELECT u.id, u.name, LOWER(u.role) AS role, u.team_id, t.supervisor_id,
+            u.commission_percentage, u.commission_threshold
        FROM users u
        LEFT JOIN teams t ON t.id = u.team_id AND t.tenant_id = u.tenant_id
       WHERE u.id = $1 AND u.tenant_id = $2 AND COALESCE(u.is_active, true)`,
@@ -1028,7 +1029,7 @@ async function getSellerCommissionPct(sellerId, tenantId, { amount = 0, closedAt
   );
   if (!r.rowCount) return null;
   const seller = r.rows[0];
-  const policy = commissionPolicyForRole(seller.role);
+  const policy = commissionPolicyForRole(seller.role, seller);
   if (!amount && !closedAt && !excludeSaleId) return {
     ...seller,
     commission_percentage: policy.percentage,

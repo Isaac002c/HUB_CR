@@ -196,6 +196,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 250));
   }
   console.log('✓ backend no ar\n');
+  const appPool = require('../config/db');
 
   // ── ASSERTS ───────────────────────────────────────────────────────────────
   console.log('== me/access ==');
@@ -227,6 +228,22 @@ async function main() {
     && !consultantNames.includes('Adm Restrito'), JSON.stringify(consultantDirectory.json?.data));
   const accS = await api('GET', '/api/me/access', tok(s1));
   check('seller: deferidos=full & agenda=full & clients=own', accS.json?.data?.access?.deferidos === 'full' && accS.json?.data?.access?.agenda === 'full' && accS.json?.data?.access?.clients === 'own');
+
+  const reactivatableLead = await api('POST', '/api/multas-leads', tok(s1), {
+    name: 'Lead Perdido Reativável', status: 'perdido',
+  });
+  await appPool.query(
+    `UPDATE multas_leads SET created_at = NOW() - INTERVAL '30 days' WHERE id = $1 AND tenant_id = $2`,
+    [reactivatableLead.json?.data?.id, T1.id],
+  );
+  const archivedOldLeads = await api('POST', '/api/multas-leads/archive-old', tok(master));
+  const visibleLeadsAfterArchive = await api('GET', '/api/multas-leads', tok(master));
+  check('lead perdido antigo continua pesquisável após arquivamento de inativos',
+    reactivatableLead.status === 201
+      && archivedOldLeads.status === 200
+      && !archivedOldLeads.json?.data?.some((lead) => lead.id === reactivatableLead.json.data.id)
+      && visibleLeadsAfterArchive.json?.data?.some((lead) => lead.id === reactivatableLead.json.data.id && lead.status === 'perdido'),
+    JSON.stringify({ archived: archivedOldLeads.json, visible: visibleLeadsAfterArchive.json?.data?.some((lead) => lead.id === reactivatableLead.json?.data?.id) }));
 
   console.log('\n== ADM: Processos (sem Gestão) ==');
   check('admin → /api/leads = 403 (removido)',        (await api('GET', '/api/leads', tok(admin))).status === 403);
@@ -924,7 +941,6 @@ async function main() {
 
   // Simula receitas legadas de perfis administrativos na mesma equipe. Mesmo
   // com team_id coincidente, o snapshot de função deve excluí-las da supervisão.
-  const appPool = require('../config/db');
   await appPool.query(
     `INSERT INTO sales (tenant_id,seller_id,team_id,seller_role_snapshot,amount,commission_percentage,commission_amount,status,closed_at,source,created_by)
      VALUES ($1,$2,$4,'admin',3000,0,0,'confirmed',$5,'accept_legacy',$2),
@@ -964,6 +980,54 @@ async function main() {
     && Number(masterSupervision.personal_commission) === 800
     && Number(masterSupervision.team_commission) === 1500
     && Number(masterSupervision.total_commission) === 2300, JSON.stringify(masterSupervision));
+
+  const marketingSellerCreated = await api('POST', '/api/users/management', tok(master), {
+    name: 'Marketing Comissão Especial', email: 'marketing-comissao@cr.com',
+    password: 'Temporaria@2026', role: 'seller',
+  });
+  const marketingSellerId = marketingSellerCreated.json?.data?.id;
+  const marketingSellerSession = { ...marketingSellerCreated.json?.data, tenant_id: T1.id, role: 'seller' };
+  const marketingClosedClient = await api('POST', '/api/clients', tok(marketingSellerSession), {
+    name: 'Cliente Fechado do Marketing', status: 'fechado',
+  });
+  const marketingContractPermissionProbe = await api('POST', '/api/contracts', tok(marketingSellerSession), {});
+  check('perfil atualizado de marketing consegue cadastrar cliente fechado e não recebe 403 ao iniciar serviço',
+    marketingSellerCreated.status === 201
+      && marketingClosedClient.status === 201
+      && marketingClosedClient.json?.data?.status === 'fechado'
+      && marketingClosedClient.json?.data?.created_by === marketingSellerId
+      && marketingContractPermissionProbe.status === 400
+      && marketingContractPermissionProbe.json?.error === 'Tipo de serviço inválido.',
+    JSON.stringify({ client: marketingClosedClient.json, contract: marketingContractPermissionProbe.json }));
+  await appPool.query(
+    `UPDATE users SET position = 'Marketing', team_id = NULL, supervisor_id = NULL,
+                       commission_percentage = 5, commission_threshold = 0
+      WHERE id = $1 AND tenant_id = $2`,
+    [marketingSellerId, T1.id],
+  );
+  const marketingSale = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: marketingSellerId, customer_name: 'Cliente do Marketing',
+    service_name: 'Multa', amount: 1000, closed_at: supervisionDate,
+    payment_method: 'pix', closing_method: 'presencial',
+  });
+  const marketingCollaborators = await api('GET', `/api/management/collaborators?month=${supervisionDate.slice(5, 7)}&year=${supervisionDate.slice(0, 4)}`, tok(master));
+  const marketingCollaborator = marketingCollaborators.json?.data?.find((row) => row.id === marketingSellerId);
+  const teamAfterMarketingSale = await api('GET', `/api/management/team/${teamA.id}?${supervisionQuery}`, tok(sup));
+  check('venda de marketing recebe 5% desde o primeiro real e não entra na equipe',
+    marketingSale.status === 201
+      && Number(marketingSale.json?.data?.commission_percentage) === 5
+      && Number(marketingSale.json?.data?.commission_trigger_amount) === 0
+      && Number(marketingSale.json?.data?.commission_amount) === 50
+      && marketingSale.json?.data?.team_id === null
+      && marketingSale.json?.data?.supervisor_id === null
+      && Number(teamAfterMarketingSale.json?.data?.supervision_commission?.team_sales_base) === 30000,
+    JSON.stringify({ sale: marketingSale.json?.data, team: teamAfterMarketingSale.json?.data?.supervision_commission }));
+  check('tela de colaboradores mostra a regra individual de marketing sem alterar consultores',
+    marketingCollaborator?.position === 'Marketing'
+      && Number(marketingCollaborator.commission_percentage) === 5
+      && Number(marketingCollaborator.commission_threshold) === 0
+      && marketingCollaborators.json?.data?.find((row) => row.id === metaSeller.id)?.commission_percentage === 10,
+    JSON.stringify(marketingCollaborator));
 
   check('10. supervisor não acessa outra equipe por URL', (await api('GET', `/api/management/team/${createdTeam.json.data.id}?${supervisionQuery}`, tok(sup))).status === 403);
   const externalSalesProbe = await api('GET', `/api/management/sales?${supervisionQuery}&seller_id=${externalSeller.id}`, tok(sup));

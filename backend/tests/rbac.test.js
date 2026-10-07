@@ -144,6 +144,18 @@ ok('Comissão total da supervisora no cenário obrigatório = R$ 2.300', () => {
 ok('Política nova não contém comissão pessoal de 20% para supervisão', () => {
   assert.notStrictEqual(commissionPolicyForRole('supervisor').percentage, 20);
 });
+ok('Exceção individual 5% sem gatilho vale desde a primeira venda', () => {
+  const policy = commissionPolicyForRole('seller', { commission_percentage: 5, commission_threshold: 0 });
+  assert.deepStrictEqual(policy, { percentage: 5, threshold: 0, mode: 'full_amount' });
+  assert.strictEqual(computeCommission(100, policy.percentage), 5);
+  assert.strictEqual(computeCommission(1000, policy.percentage), 50);
+});
+ok('Configuração padrão de consultor continua em 10% após R$ 7.500', () => {
+  assert.deepStrictEqual(
+    commissionPolicyForRole('seller', { commission_percentage: 10, commission_threshold: 7500 }),
+    { percentage: 10, threshold: 7500, mode: 'threshold_excess' },
+  );
+});
 ok('Snapshot: alterar o % do vendedor NÃO muda a venda antiga', () => {
   // Venda antiga gravou 5% → R$ 50, independente de o vendedor virar 10% depois.
   const antiga = { amount: 1000, commission_percentage_snapshot: 5 };

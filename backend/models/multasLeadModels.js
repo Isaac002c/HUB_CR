@@ -197,7 +197,7 @@ const archiveOldLeads = async (tenant_id) => {
        AND (
          (status = 'negociacao'  AND created_at < NOW() - INTERVAL '30 days')
          OR
-         (status NOT IN ('negociacao','entrada','fechado') AND created_at < NOW() - INTERVAL '7 days')
+         (status NOT IN ('negociacao','entrada','fechado','perdido') AND created_at < NOW() - INTERVAL '7 days')
        )
      RETURNING id, status, created_at`,
     [tenant_id]
