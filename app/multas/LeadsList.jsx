@@ -57,6 +57,20 @@ const displayToIso = (v) => {
 };
 
 const getStatusInfo = (v) => ALL_STATUSES.find(s=>s.value===v) || { label: v, color: '#94a3b8' };
+const matchesLeadSearch = (lead, value) => {
+  const query = String(value || '').trim().toLocaleLowerCase('pt-BR');
+  if (!query) return true;
+
+  const searchableFields = [lead.name, lead.cpf, lead.cnh, lead.phone]
+    .map(field => String(field || '').toLocaleLowerCase('pt-BR'));
+  const textMatch = searchableFields.some(field => field.includes(query));
+  const digitsQuery = query.replace(/\D/g, '');
+  const numericQuery = /^[\d\s()+./-]+$/.test(query);
+  const digitsMatch = numericQuery && digitsQuery.length > 0 && [lead.cpf, lead.cnh, lead.phone]
+    .some(field => String(field || '').replace(/\D/g, '').includes(digitsQuery));
+
+  return textMatch || digitsMatch;
+};
 
 export default function LeadsList() {
   const [leads,        setLeads]        = useState([]);
@@ -96,7 +110,7 @@ export default function LeadsList() {
   useEffect(() => { load(); }, [load]);
 
   const displayed = leads.filter(l =>
-    (!search || l.name?.toLowerCase().includes(search.toLowerCase())) &&
+    matchesLeadSearch(l, search) &&
     (!filterStatus || l.status === filterStatus)
   );
 
@@ -181,7 +195,7 @@ export default function LeadsList() {
               style={{ position:'absolute', left:10, top:'50%', transform:'translateY(-50%)' }}>
               <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-            <input type="text" placeholder="Buscar por nome..." value={search}
+            <input type="text" placeholder="Buscar por nome, CPF, CNH ou telefone..." value={search}
               onChange={e=>setSearch(e.target.value)}
               style={{ paddingLeft:34, paddingRight:12, paddingTop:8, paddingBottom:8, border:'1px solid #e2e8f0', borderRadius:8, fontSize:13, outline:'none', background:'#fff', color:'#0f172a', width:200 }}
             />
