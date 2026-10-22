@@ -4,7 +4,7 @@ const {
   TEMPLATE_CATALOG, buildAgreementPdf, buildPowerOfAttorneyPdf, currencyToWords, parseAmount, FOOTER_EMAIL,
   COMPANY_SIGNATURE_PATH,
   formatDate, formatCPF, formatCNH, formatPhone, sentence,
-  SNE_CLAUSE_TITLE, SNE_CLAUSE_TEXT,
+  SNE_CLAUSE_TITLE, SNE_CLAUSE_TEXT, LATE_PAYMENT_CLAUSE_TEXT,
 } = require('../services/generatedDocumentService');
 
 (async () => {
@@ -22,28 +22,35 @@ const {
   assert(fs.existsSync(COMPANY_SIGNATURE_PATH), 'A assinatura institucional deve acompanhar o gerador de contratos.');
   assert(SNE_CLAUSE_TITLE.includes('SNE'));
   assert(SNE_CLAUSE_TEXT.includes('Sistema de Notificação Eletrônica'));
+  assert.strictEqual(
+    LATE_PAYMENT_CLAUSE_TEXT,
+    '§ 3º. Dos encargos por atraso no pagamento. Nos casos em que o pagamento dos honorários for realizado por meio de boleto bancário, o não pagamento da parcela até a data de vencimento acarretará a incidência de multa moratória de 2% (dois por cento) sobre o valor da parcela vencida e não paga, acrescida de juros de mora de 1% (um por cento) ao mês, calculados proporcionalmente aos dias de atraso, observada a legislação aplicável.',
+  );
   assert.strictEqual(TEMPLATE_CATALOG.find((item) => item.id === 'contrato_suspensao')?.include_sne_clause, undefined);
   assert.strictEqual(TEMPLATE_CATALOG.find((item) => item.id === 'contrato_multa')?.include_sne_clause, true);
   assert.strictEqual(TEMPLATE_CATALOG.find((item) => item.id === 'contrato_suspensao_hibrido')?.include_sne_clause, true);
   assert.strictEqual(TEMPLATE_CATALOG.find((item) => item.id === 'procuracao')?.available, true);
 
-  const template = TEMPLATE_CATALOG.find((item) => item.id === 'contrato_suspensao');
-  const pdf = await buildAgreementPdf({
-    client: {
-      name: 'Cliente de Validação', cpf: '12345678901', cnh: '01234567890',
-      birth_date: '1990-05-20', first_cnh: '2010-03-10', phone: '(21) 99999-9999',
-      email: 'cliente@example.com', address: 'Rua de Teste, 100 - Rio de Janeiro/RJ',
-    },
-    template,
-    contractObject: 'Assessoria e acompanhamento de processo administrativo de suspensão.',
-    amount: 1250.5,
-    paymentTerms: 'Entrada de R$ 500,00 e saldo em 3 parcelas.',
-    issuedAt: new Date('2026-08-27T15:00:00-03:00'),
-  });
+  const contracts = TEMPLATE_CATALOG.filter((item) => item.document_kind === 'contract');
+  assert.strictEqual(contracts.length, 6, 'A lista de contratos deve abranger todos os seis modelos vigentes.');
+  for (const template of contracts) {
+    const pdf = await buildAgreementPdf({
+      client: {
+        name: 'Cliente de Validação', cpf: '12345678901', cnh: '01234567890',
+        birth_date: '1990-05-20', first_cnh: '2010-03-10', phone: '(21) 99999-9999',
+        email: 'cliente@example.com', address: 'Rua de Teste, 100 - Rio de Janeiro/RJ',
+      },
+      template,
+      contractObject: 'Assessoria e acompanhamento de processo administrativo de suspensão.',
+      amount: 1250.5,
+      paymentTerms: 'Entrada de R$ 500,00 e saldo em 3 parcelas.',
+      issuedAt: new Date('2026-08-27T15:00:00-03:00'),
+    });
 
-  assert(Buffer.isBuffer(pdf));
-  assert(pdf.subarray(0, 4).equals(Buffer.from('%PDF')));
-  assert(pdf.length > 10000);
+    assert(Buffer.isBuffer(pdf), `${template.id} deve gerar um buffer PDF.`);
+    assert(pdf.subarray(0, 4).equals(Buffer.from('%PDF')), `${template.id} deve gerar um PDF válido.`);
+    assert(pdf.length > 10000, `${template.id} deve conter o documento completo.`);
+  }
 
   const powerOfAttorney = await buildPowerOfAttorneyPdf({
     client: {

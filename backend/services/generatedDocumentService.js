@@ -16,6 +16,7 @@ const TEMPLATE_CATALOG = [
 
 const SNE_CLAUSE_TITLE = 'DO PAGAMENTO DA MULTA PELO CONTRATANTE POR MEIO DO SNE';
 const SNE_CLAUSE_TEXT = 'Caso o CONTRATANTE realize o pagamento da(s) multa(s) objeto deste contrato por meio do Sistema de Notificação Eletrônica – SNE, após a assinatura deste instrumento, a CONTRATADA ficará desobrigada de prosseguir com os serviços contratados, uma vez que a opção pelo pagamento com desconto pelo SNE implica a impossibilidade de apresentação do respectivo recurso administrativo, não cabendo à CONTRATADA a restituição dos valores já pagos.';
+const LATE_PAYMENT_CLAUSE_TEXT = '§ 3º. Dos encargos por atraso no pagamento. Nos casos em que o pagamento dos honorários for realizado por meio de boleto bancário, o não pagamento da parcela até a data de vencimento acarretará a incidência de multa moratória de 2% (dois por cento) sobre o valor da parcela vencida e não paga, acrescida de juros de mora de 1% (um por cento) ao mês, calculados proporcionalmente aos dias de atraso, observada a legislação aplicável.';
 
 const UNIT = ['', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove'];
 const TEN_TO_NINETEEN = ['dez', 'onze', 'doze', 'treze', 'quatorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
@@ -283,6 +284,7 @@ function buildAgreementPdf({ client, template, contractObject, amount, paymentTe
     ]);
     addBody(doc, '§1º. O valor montante é por todo o processo administrativo do objeto do contrato.');
     addBody(doc, '§2º. Em caso de inadimplência, a CONTRATADA fica desobrigada a prosseguir com o processo e todos os atos relacionados ao presente contrato.');
+    addBody(doc, LATE_PAYMENT_CLAUSE_TEXT);
 
     addSection(doc, 'CONDIÇÕES GERAIS');
     addBody(doc, 'Cláusula 5ª. O presente contrato passa a valer a partir da assinatura pelas partes e da comprovação de pagamento.');
@@ -401,4 +403,5 @@ module.exports = {
   sentence,
   SNE_CLAUSE_TITLE,
   SNE_CLAUSE_TEXT,
+  LATE_PAYMENT_CLAUSE_TEXT,
 };
