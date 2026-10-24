@@ -185,6 +185,7 @@ export default function Equipes() {
           <MonthlyTargetCard
             key={`${selected}-${period.year}-${period.month}-${closing.team_target?.amount ?? 'none'}`}
             target={closing.team_target}
+            currentAmount={cur.total_amount}
             title="Meta mensal da equipe"
             description="Meta coletiva desta equipe, independente das metas individuais dos colaboradores."
             period={period}
@@ -307,10 +308,15 @@ function TeamModal({ mode, team, supervisors, onClose, onSubmit, onDelete }) {
   );
 }
 
-function MonthlyTargetCard({ target, period, canEdit, onSave, title, description }) {
+function MonthlyTargetCard({ target, period, canEdit, onSave, title, description, currentAmount = null }) {
   const [value, setValue] = useState(() => formatMoneyInput(target?.amount));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const hasProgress = currentAmount !== null && currentAmount !== undefined;
+  const sold = Number(currentAmount) || 0;
+  const goal = Number(target?.amount) || 0;
+  const progress = goal > 0 ? Math.min((sold / goal) * 100, 100) : 0;
+  const remaining = Math.max(goal - sold, 0);
   const monthName = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' })
     .format(new Date(period.year, period.month - 1, 1));
   const submit = async (event) => {
@@ -334,6 +340,18 @@ function MonthlyTargetCard({ target, period, canEdit, onSave, title, description
       <button className="btn-primary" disabled={saving}>{saving ? 'Salvando...' : target?.configured ? 'Atualizar meta' : 'Definir meta'}</button>
       {error && <span style={{ color: '#b91c1c', fontSize: 12 }}>{error}</span>}
     </form>}
+    {hasProgress && <div style={{ marginTop: 14, padding: '12px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 8 }}>
+        <span style={{ color: '#64748b', fontSize: 13 }}>Vendido pela equipe: <strong style={{ color: '#0f172a' }}>{formatBRL(sold)}</strong></span>
+        <span style={{ color: '#64748b', fontSize: 13 }}>{goal > 0 ? 'Falta para a meta:' : 'Meta não definida:'} <strong style={{ color: '#751518' }}>{goal > 0 ? formatBRL(remaining) : '—'}</strong></span>
+      </div>
+      {goal > 0
+        ? <div role="progressbar" aria-label="Progresso da meta da equipe" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} style={{ height: 8, overflow: 'hidden', background: '#e2e8f0', borderRadius: 999 }}>
+            <div style={{ width: `${progress}%`, height: '100%', background: progress >= 100 ? '#16a34a' : '#751518', borderRadius: 999, transition: 'width 180ms ease' }} />
+          </div>
+        : <span style={{ color: '#94a3b8', fontSize: 12 }}>Defina o valor da meta acima para acompanhar o progresso.</span>}
+      {goal > 0 && <div style={{ marginTop: 5, color: '#64748b', fontSize: 12 }}>{progress.toFixed(0)}% da meta atingida</div>}
+    </div>}
   </div>;
 }
 

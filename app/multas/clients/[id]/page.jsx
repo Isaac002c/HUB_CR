@@ -838,8 +838,8 @@ export default function ClientDetail() {
                           {name === 'MULTA' && <><th>Nº Auto de Infração</th><th>Placa</th><th>Enquadramento</th><th>Órgão</th></>}
                           {name === 'TRI' && <><th>Nº Auto de Infração</th><th>Placa</th><th>Enquadramento</th><th>Nome do Real Infrator</th><th>Órgão</th></>}
                           {(name === 'SUSPENSAO' || name === 'CASSACAO') && <><th>Nº Processo</th><th>Órgão</th></>}
-                          {name === 'CRCI' && <th>Nº Processo</th>}
-                          {name !== 'MULTA' && name !== 'TRI' && name !== 'SUSPENSAO' && name !== 'CASSACAO' && name !== 'CRCI' && <th>Serviço</th>}
+                          {(name === 'CRCI' || name === 'REVISAO DE ATOS') && <th>Nº Processo</th>}
+                          {name !== 'MULTA' && name !== 'TRI' && name !== 'SUSPENSAO' && name !== 'CASSACAO' && name !== 'CRCI' && name !== 'REVISAO DE ATOS' && <th>Serviço</th>}
                           <th>Prazo</th>
                           <th>Andamento</th>
                           <th>Observações</th>
@@ -875,10 +875,10 @@ export default function ClientDetail() {
                                 <td>{contract.organ || '—'}</td>
                               </>
                             )}
-                            {name === 'CRCI' && (
+                            {(name === 'CRCI' || name === 'REVISAO DE ATOS') && (
                               <td style={{ fontFamily: 'monospace' }}>{contract.numero_multa || '—'}</td>
                             )}
-                            {name !== 'MULTA' && name !== 'TRI' && name !== 'SUSPENSAO' && name !== 'CASSACAO' && name !== 'CRCI' && (
+                            {name !== 'MULTA' && name !== 'TRI' && name !== 'SUSPENSAO' && name !== 'CASSACAO' && name !== 'CRCI' && name !== 'REVISAO DE ATOS' && (
                               <td>{label}</td>
                             )}
                             <td style={{ fontSize: 13, ...getPrazoStyle(contract.due_date) }}>
@@ -1382,7 +1382,7 @@ export default function ClientDetail() {
                           )}
                         </>
                       )}
-                      {name === 'CRCI' && (
+                      {(name === 'CRCI' || name === 'REVISAO DE ATOS') && (
                         <div className="form-group">
                           <label>Nº do Processo</label>
                           <input
