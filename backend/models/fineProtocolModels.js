@@ -7,6 +7,10 @@ const FULL_SCOPE_ROLES = new Set(['master', 'admin', 'super_admin']);
 const canAccessFine = async (fine_id, tenant_id, { role, userId, teamId } = {}) => {
   const normalizedRole = String(role || 'seller').toLowerCase();
   const params = [fine_id, tenant_id];
+  // A client/company can be transferred without changing the historic fine's
+  // seller_id. Use the current entity owner when present; retain seller_id as
+  // fallback for legacy records without an owner.
+  const currentOwner = 'COALESCE(c.created_by, co.created_by, f.seller_id)';
   let scope = '';
   if (FULL_SCOPE_ROLES.has(normalizedRole)) {
     scope = '';
@@ -14,14 +18,17 @@ const canAccessFine = async (fine_id, tenant_id, { role, userId, teamId } = {}) 
     params.push(teamId || null);
     scope = ` AND EXISTS (
       SELECT 1 FROM users owner
-       WHERE owner.id=f.seller_id AND owner.tenant_id=f.tenant_id AND owner.team_id=$3
+       WHERE owner.id=${currentOwner} AND owner.tenant_id=f.tenant_id AND owner.team_id=$3
     )`;
   } else {
     params.push(userId || null);
-    scope = ' AND f.seller_id=$3';
+    scope = ` AND ${currentOwner}=$3`;
   }
   const result = await pool.query(
-    `SELECT 1 FROM fines f WHERE f.id=$1 AND f.tenant_id=$2${scope}`,
+    `SELECT 1 FROM fines f
+       LEFT JOIN clients c ON c.id=f.client_id AND c.tenant_id=f.tenant_id
+       LEFT JOIN companies co ON co.id=f.company_id AND co.tenant_id=f.tenant_id
+      WHERE f.id=$1 AND f.tenant_id=$2${scope}`,
     params
   );
   return result.rowCount > 0;
