@@ -7,6 +7,7 @@
 import React, { useState, useEffect } from 'react';
 import { listByFine, createProtocol, updateProtocol, deleteProtocol, sendProtocolEmail, getProtocolEmailHistory } from '../../lib/fineProtocolsAPI';
 import { uploadFile } from '../../lib/uploadsAPI';
+import { toProtocolDateDisplay, toProtocolDateIso } from '../../lib/protocolDates.mjs';
 
 const formatDate = (v) => {
   if (!v) return '—';
@@ -25,23 +26,6 @@ const normalizeDate = (v) => {
   if (digits.length <= 4) return `${digits.slice(0,2)}/${digits.slice(2)}`;
   return `${digits.slice(0,2)}/${digits.slice(2,4)}/${digits.slice(4)}`;
 };
-const isoToDisplay = (v) => {
-  if (!v) return '';
-  const s = v.substring(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) { const [y, m, d] = s.split('-'); return `${d}/${m}/${y}`; }
-  return s;
-};
-const displayToIso = (v) => {
-  if (!v || !v.trim()) return null;
-  const s = v.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const mSep = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
-  if (mSep) return `${mSep[3]}-${mSep[2].padStart(2,'0')}-${mSep[1].padStart(2,'0')}`;
-  const mRaw = s.match(/^(\d{2})(\d{2})(\d{4})$/);
-  if (mRaw) return `${mRaw[3]}-${mRaw[2]}-${mRaw[1]}`;
-  return null;
-};
-
 // Sem "Pendente" (mesma spec do módulo de multas)
 const PROTOCOL_STATUS_OPTIONS = [
   { value: 'protocolado', label: 'Protocolado' },
@@ -71,8 +55,8 @@ function ProtocolItemForm({ form, setForm, onSubmit, onCancel, submitting, uploa
         </div>
         <div><label style={{ fontSize:11, color:'#64748b', display:'block', marginBottom:3 }}>Data</label>
           <div style={{ display:'flex', gap:4 }}>
-            <input type="text" value={isoToDisplay(form.protocol_date||'')} onChange={e=>setForm(p=>({...p,protocol_date:normalizeDate(e.target.value)}))} placeholder="dd/mm/aaaa" inputMode="numeric" style={{ flex:1, padding:'6px 8px', border:'1px solid #e2e8f0', borderRadius:6, fontSize:12 }} />
-            <input type="date" value={displayToIso(form.protocol_date)||''} onChange={e=>setForm(p=>({...p,protocol_date: e.target.value? isoToDisplay(e.target.value):''}))} title="Calendário" aria-label="Escolher data" style={{ width:32, flexShrink:0, padding:0, border:'1px solid #e2e8f0', borderRadius:6, fontSize:12 }} />
+            <input type="text" value={toProtocolDateDisplay(form.protocol_date||'')} onChange={e=>setForm(p=>({...p,protocol_date:normalizeDate(e.target.value)}))} placeholder="dd/mm/aaaa" inputMode="numeric" style={{ flex:1, padding:'6px 8px', border:'1px solid #e2e8f0', borderRadius:6, fontSize:12 }} />
+            <input type="date" value={toProtocolDateIso(form.protocol_date)||''} onChange={e=>setForm(p=>({...p,protocol_date: e.target.value? toProtocolDateDisplay(e.target.value):''}))} title="Calendário" aria-label="Escolher data" style={{ width:32, flexShrink:0, padding:0, border:'1px solid #e2e8f0', borderRadius:6, fontSize:12 }} />
           </div>
         </div>
         <div><label style={{ fontSize:11, color:'#64748b', display:'block', marginBottom:3 }}>Status</label>
@@ -155,7 +139,7 @@ export default function ProtocolPanel({ contract, onClose }) {
   const handleAdd = async () => {
     setSaving(true);
     try {
-      const created = await createProtocol({ ...newForm, protocol_date: displayToIso(newForm.protocol_date), fine_id: contract.id });
+      const created = await createProtocol({ ...newForm, protocol_date: toProtocolDateIso(newForm.protocol_date), fine_id: contract.id });
       setProtocols(prev => [...prev, created]);
       setNewForm({ ...emptyProto });
       setShowAddForm(false);
@@ -256,7 +240,7 @@ export default function ProtocolPanel({ contract, onClose }) {
                       const current = protocols.find(p=>p.id===proto.id) || proto;
                       setSaving(true);
                       try {
-                        const updated = await updateProtocol(current.id, { ...current, protocol_date: displayToIso(current.protocol_date) });
+                        const updated = await updateProtocol(current.id, { ...current, protocol_date: toProtocolDateIso(current.protocol_date) });
                         setProtocols(prev => prev.map(p=>p.id===current.id ? updated : p));
                         setEditingId(null);
                       } catch (err) { setUploadError(err.message); }

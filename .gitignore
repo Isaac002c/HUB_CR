@@ -46,3 +46,5 @@ npm-debug.log*
 Thumbs.db
 coverage/
 *.tsbuildinfo
+.vercel
+.env*
