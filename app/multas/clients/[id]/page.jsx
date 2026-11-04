@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import { getClientById, updateClient } from '../../../lib/clientsAPI';
 import { getConsultants } from '../../../lib/calendarAPI';
 import { getServicesByClient, deleteService, getServiceTypes } from '../../../lib/servicesAPI';
@@ -240,12 +240,40 @@ const PROTOCOL_STATUS_OPTIONS = [
   { value: 'indeferido',  label: 'Indeferido' },
 ];
 
+const CLIENT_LIST_RETURN_STATE_KEY = 'cr:clients:return-state';
+const DEFAULT_CLIENT_LIST_PATH = '/dashboard?module=multas&tab=clients';
+
+const getClientListReturnPath = (value) => {
+  if (!value || !value.startsWith('/')) return DEFAULT_CLIENT_LIST_PATH;
+  try {
+    const target = new URL(value, 'https://cr-recursos.invalid');
+    const params = target.searchParams;
+    if (target.origin !== 'https://cr-recursos.invalid'
+      || target.pathname !== '/dashboard'
+      || params.get('module') !== 'multas'
+      || params.get('tab') !== 'clients') {
+      return DEFAULT_CLIENT_LIST_PATH;
+    }
+    return DEFAULT_CLIENT_LIST_PATH;
+  } catch (_) {
+    return DEFAULT_CLIENT_LIST_PATH;
+  }
+};
+
 // ─── Componente principal ────────────────────────────
 
 export default function ClientDetail() {
   const router   = useRouter();
   const params   = useParams();
+  const searchParams = useSearchParams();
   const clientId = params?.id;
+  const clientListReturnPath = getClientListReturnPath(searchParams.get('returnTo'));
+
+  const returnToClientList = () => router.replace(clientListReturnPath);
+  const goToHome = () => {
+    try { window.sessionStorage.removeItem(CLIENT_LIST_RETURN_STATE_KEY); } catch (_) {}
+    router.push('/dashboard?module=multas&tab=dashboard');
+  };
 
   const currentUser = typeof window !== 'undefined'
     ? JSON.parse(localStorage.getItem('user') || '{}') : {};
@@ -673,7 +701,8 @@ export default function ClientDetail() {
   if (!client) return (
     <div style={{ textAlign: 'center', padding: 60 }}>
       <p style={{ color: '#ef4444', marginBottom: 16 }}>Cliente não encontrado.</p>
-      <button onClick={() => router.back()} className="btn-secondary">← Voltar</button>
+      <button onClick={returnToClientList} className="btn-secondary">← Voltar à lista</button>
+      <button onClick={goToHome} className="btn-secondary" style={{ marginLeft: 8 }}>Início</button>
     </div>
   );
 
@@ -687,12 +716,14 @@ export default function ClientDetail() {
 
       {/* Breadcrumb */}
       <div className="cd-breadcrumb">
-        <button onClick={() => router.push('/dashboard?module=multas&tab=clients')} className="cd-back-btn">
+        <button onClick={returnToClientList} className="cd-back-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Clientes
+          Voltar à lista
         </button>
+        <span className="cd-breadcrumb-sep">/</span>
+        <button onClick={goToHome} className="cd-back-btn">Início</button>
         <span className="cd-breadcrumb-sep">/</span>
         <span className="cd-breadcrumb-current">{client.name}</span>
       </div>

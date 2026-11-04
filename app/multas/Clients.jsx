@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getClients, searchClients, createClient, updateClient, deleteClient } from '../lib/clientsAPI';
 import { getConsultants } from '../lib/calendarAPI';
@@ -56,6 +56,8 @@ const CLIENTS_PAGE_STATUS_OPTIONS = CLIENT_STATUS_OPTIONS.filter(({ value }) => 
   value === 'negociacao' || value === 'fechado'
 ));
 const CLIENTS_PAGE_STATUSES = new Set(CLIENTS_PAGE_STATUS_OPTIONS.map(({ value }) => value));
+const CLIENT_LIST_RETURN_PATH = '/dashboard?module=multas&tab=clients';
+const CLIENT_LIST_RETURN_STATE_KEY = 'cr:clients:return-state';
 
 const STATUS_LABELS = Object.fromEntries(CLIENT_STATUS_OPTIONS.map((option) => [option.value, option.label]));
 
@@ -96,6 +98,7 @@ export default function MultasClients() {
   const [searchingOutside, setSearchingOutside] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterConsultant, setFilterConsultant] = useState('');
+  const pendingScrollRestore = useRef(null);
   const [formData, setFormData]       = useState(EMPTY_FORM);
   const [saving, setSaving]           = useState(false);
   const [formError, setFormError]     = useState(null);
@@ -105,7 +108,36 @@ export default function MultasClients() {
   const canFilterConsultant = ['master', 'admin', 'supervisor', 'super_admin'].includes(currentRole);
   const canManageConsultant = ['master', 'supervisor'].includes(currentRole);
 
-  useEffect(() => { loadClients(); }, []);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(CLIENT_LIST_RETURN_STATE_KEY) || 'null');
+      const params = new URLSearchParams(window.location.search);
+      const isClientsList = window.location.pathname === '/dashboard'
+        && params.get('module') === 'multas'
+        && params.get('tab') === 'clients';
+
+      if (isClientsList && saved) {
+        setSearchTerm(typeof saved.searchTerm === 'string' ? saved.searchTerm : '');
+        setFilterStatus(typeof saved.filterStatus === 'string' ? saved.filterStatus : '');
+        setFilterConsultant(typeof saved.filterConsultant === 'string' ? saved.filterConsultant : '');
+        pendingScrollRestore.current = Number.isFinite(Number(saved.scrollTop))
+          ? Number(saved.scrollTop)
+          : 0;
+      }
+      sessionStorage.removeItem(CLIENT_LIST_RETURN_STATE_KEY);
+    } catch (_) {}
+    loadClients();
+  }, []);
+
+  useEffect(() => {
+    if (loading || pendingScrollRestore.current === null) return;
+    const top = pendingScrollRestore.current;
+    pendingScrollRestore.current = null;
+    requestAnimationFrame(() => {
+      const scrollContainer = document.querySelector('.shell-content');
+      if (scrollContainer) scrollContainer.scrollTop = top;
+    });
+  }, [loading]);
 
   useEffect(() => {
     const query = searchTerm.trim();
@@ -151,6 +183,21 @@ export default function MultasClients() {
 
   const handleSearch = (e) => {
     setSearchTerm(e.target.value);
+  };
+
+  const openClient = (clientId) => {
+    try {
+      const scrollContainer = document.querySelector('.shell-content');
+      sessionStorage.setItem(CLIENT_LIST_RETURN_STATE_KEY, JSON.stringify({
+        searchTerm,
+        filterStatus,
+        filterConsultant,
+        scrollTop: scrollContainer?.scrollTop || 0,
+      }));
+    } catch (_) {}
+
+    const returnParams = new URLSearchParams({ returnTo: CLIENT_LIST_RETURN_PATH });
+    router.push(`/multas/clients/${encodeURIComponent(clientId)}?${returnParams.toString()}`);
   };
 
   const validateForm = () => {
@@ -381,7 +428,7 @@ export default function MultasClients() {
                   <strong>{client.name}</strong>
                   <span>Status: {STATUS_LABELS[client.status] || client.status || 'Não informado'} · Consultor: {client.consultant_name || 'Não atribuído'}</span>
                 </div>
-                <button type="button" onClick={() => router.push(`/multas/clients/${client.id}`)}>
+                <button type="button" onClick={() => openClient(client.id)}>
                   Abrir ficha
                 </button>
               </li>
@@ -437,7 +484,7 @@ export default function MultasClients() {
             ) : displayed.map((client) => (
               <tr key={client.id}>
                 <td>
-                  <button type="button" className="client-name-link" onClick={() => router.push(`/multas/clients/${client.id}`)}>
+                  <button type="button" className="client-name-link" onClick={() => openClient(client.id)}>
                     <div style={{
                       width: 32, height: 32, borderRadius: '50%',
                       background: 'rgba(117,21,24,0.1)', color: '#751518',
