@@ -6,6 +6,7 @@ import { getContractDashboard, getStageClients, getDeferred, getRealInfractorAle
 import { getClients } from '../lib/clientsAPI';
 import { getUpcomingEvents, getEventsRange } from '../lib/calendarAPI';
 import { getKanbanLeads } from '../lib/multasLeadsAPI';
+import { clientDetailHref } from '../lib/clientNavigation';
 import UserHome from './UserHome';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
@@ -164,7 +165,7 @@ function StagePanel({ groupKey, info, stageData, onClose }) {
                     <div
                       key={`${c.fine_id}`}
                       className="md-stage-client-card"
-                      onClick={() => router.push(`/multas/clients/${c.client_id}`)}
+                      onClick={() => router.push(clientDetailHref(c.client_id))}
                       role="button"
                       tabIndex={0}
                     >
@@ -199,7 +200,7 @@ function DeferidosPanel({ items, onClose }) {
   const router = useRouter();
   const color = '#15803d';
   const open = (it) => {
-    if (it.client_id)       router.push(`/multas/clients/${it.client_id}`);
+    if (it.client_id)       router.push(clientDetailHref(it.client_id));
     else if (it.company_id) router.push(`/multas/companies/${it.company_id}`);
   };
   return (
@@ -256,7 +257,7 @@ function RealInfractorPanel({ items, onClose }) {
   const router = useRouter();
   const color = REAL_INFRATOR_INFO.color;
   const open = (it) => {
-    if (it.client_id) router.push(`/multas/clients/${it.client_id}`);
+    if (it.client_id) router.push(clientDetailHref(it.client_id));
     else if (it.company_id && it.vehicle_id) router.push(`/multas/companies/${it.company_id}/vehicles/${it.vehicle_id}`);
     else if (it.company_id) router.push(`/multas/companies/${it.company_id}`);
   };

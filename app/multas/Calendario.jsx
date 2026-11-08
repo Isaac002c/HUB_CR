@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getDeadlines } from '../lib/contractsAPI';
+import { clientDetailHref } from '../lib/clientNavigation';
 
 // ─── Datas (date-only, sem shift de fuso) ───────────────────────────────────────
 
@@ -166,7 +167,7 @@ export default function MultasAgenda() {
   // Empresa com veículo → detalhe do veículo (onde vivem os processos);
   // Empresa sem veículo → detalhe da empresa.
   const openItem = (it) => {
-    if (it?.client_id) { router.push(`/multas/clients/${it.client_id}`); return; }
+    if (it?.client_id) { router.push(clientDetailHref(it.client_id)); return; }
     if (it?.company_id && it?.vehicle_id) { router.push(`/multas/companies/${it.company_id}/vehicles/${it.vehicle_id}`); return; }
     if (it?.company_id) { router.push(`/multas/companies/${it.company_id}`); return; }
   };

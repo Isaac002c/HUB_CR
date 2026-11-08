@@ -654,6 +654,32 @@ async function main() {
     && Number(novaVenda.json.data.commission_amount) === 100,
   JSON.stringify(novaVenda.json?.data));
 
+  const originalSaleDate = String(novaVenda.json.data.closed_at).substring(0, 10);
+  const previousSaleDate = new Date(`${originalSaleDate}T12:00:00Z`);
+  previousSaleDate.setUTCDate(previousSaleDate.getUTCDate() - 1);
+  const editedNonInstallmentSale = await api('PUT', `/api/management/sales/${novaVenda.json.data.id}`, tok(master), {
+    seller_id: s1.id,
+    closed_at: previousSaleDate.toISOString().substring(0, 10),
+    customer_name: novaVenda.json.data.customer_name || 'Cliente de teste',
+    service_name: novaVenda.json.data.service_name || novaVenda.json.data.description || 'Venda de teste',
+    description: novaVenda.json.data.description || 'Venda de teste',
+    amount: Number(novaVenda.json.data.amount),
+    installment_number: null,
+    installment_total: null,
+    installment_plan_id: null,
+    installment_frequency: null,
+    next_installment_due_date: null,
+    is_settlement: false,
+    payment_method: 'a_vista',
+    closing_method: 'remoto',
+    status: 'confirmed',
+  });
+  check('editar a data de venda não parcelada salva sem enviar NULL em is_settlement',
+    editedNonInstallmentSale.status === 200
+      && String(editedNonInstallmentSale.json?.data?.closed_at).substring(0, 10) === previousSaleDate.toISOString().substring(0, 10)
+      && editedNonInstallmentSale.json?.data?.is_settlement === false,
+    JSON.stringify(editedNonInstallmentSale.json));
+
   const ownerSale = await api('POST', '/api/management/sales', tok(master), {
     seller_id: master.id, customer_name: 'Cliente da Proprietária', service_name: 'Suspensão',
     amount: 1200, closed_at: '2028-01-15', payment_method: 'pix', closing_method: 'remoto',
@@ -1082,37 +1108,58 @@ async function main() {
   });
   check('API exige todos os valores e vencimentos da agenda antes de gravar a venda', missingSchedule.status === 400,
     JSON.stringify(missingSchedule.json));
+  const futureDueDate = (monthsAhead) => {
+    const date = new Date();
+    date.setUTCDate(1);
+    date.setUTCMonth(date.getUTCMonth() + monthsAhead);
+    date.setUTCDate(15);
+    return date.toISOString().substring(0, 10);
+  };
+  const agendaFirstDue = futureDueDate(1);
+  const agendaSecondDue = futureDueDate(2);
+  const dueCompetence = (date) => ({
+    month: Number(date.substring(5, 7)),
+    year: Number(date.substring(0, 4)),
+  });
+  const firstCompetence = dueCompetence(agendaFirstDue);
+  const secondCompetence = dueCompetence(agendaSecondDue);
+  const earlierDue = new Date(`${agendaFirstDue}T12:00:00Z`);
+  earlierDue.setUTCDate(earlierDue.getUTCDate() - 1);
+  const outOfOrderDueDate = earlierDue.toISOString().substring(0, 10);
+  const laterThirdDue = new Date(`${agendaSecondDue}T12:00:00Z`);
+  laterThirdDue.setUTCDate(laterThirdDue.getUTCDate() + 2);
+  const adjustedThirdDueDate = laterThirdDue.toISOString().substring(0, 10);
   const scheduledSale = await api('POST', '/api/management/sales', tok(master), {
     seller_id: metaSeller.id, customer_name: 'Cliente parcelas variáveis', service_name: 'Suspensão',
     amount: 200, closed_at: '2026-10-01', installment_number: 1, installment_total: 3,
     installment_frequency: 'monthly', payment_method: 'boleto', closing_method: 'remoto',
     installment_schedule: [
-      { installment_number: 2, due_date: '2026-10-15', expected_amount: 300 },
-      { installment_number: 3, due_date: '2026-11-15', expected_amount: 350 },
+      { installment_number: 2, due_date: agendaFirstDue, expected_amount: 300 },
+      { installment_number: 3, due_date: agendaSecondDue, expected_amount: 350 },
     ],
   });
-  const octoberCharges = await api('GET', '/api/management/sales/installments?month=10&year=2026', tok(master));
-  const novemberCharges = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
-  const octoberCharge = octoberCharges.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
-  const novemberCharge = novemberCharges.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
+  const firstMonthCharges = await api('GET', `/api/management/sales/installments?month=${firstCompetence.month}&year=${firstCompetence.year}`, tok(master));
+  const secondMonthCharges = await api('GET', `/api/management/sales/installments?month=${secondCompetence.month}&year=${secondCompetence.year}`, tok(master));
+  const firstMonthCharge = firstMonthCharges.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
+  const secondMonthCharge = secondMonthCharges.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
   const prePaymentSales = await api('GET', `/api/management/sales?seller_id=${metaSeller.id}&month=10&year=2026`, tok(master));
   check('agenda aceita cobranças de valores diferentes e as separa por competência', scheduledSale.status === 201
-    && Number(octoberCharge?.pending_amount) === 300
-    && String(octoberCharge?.next_installment_due_date).substring(0, 10) === '2026-10-15'
-    && Number(novemberCharge?.pending_amount) === 350
-    && String(novemberCharge?.next_installment_due_date).substring(0, 10) === '2026-11-15',
-  JSON.stringify({ scheduledSale: scheduledSale.json, octoberCharge, novemberCharge }));
+    && Number(firstMonthCharge?.pending_amount) === 300
+    && String(firstMonthCharge?.next_installment_due_date).substring(0, 10) === agendaFirstDue
+    && Number(secondMonthCharge?.pending_amount) === 350
+    && String(secondMonthCharge?.next_installment_due_date).substring(0, 10) === agendaSecondDue,
+  JSON.stringify({ scheduledSale: scheduledSale.json, firstMonthCharge, secondMonthCharge }));
   check('parcelas previstas não entram no faturamento até a confirmação', prePaymentSales.status === 200
     && prePaymentSales.json.data.filter((sale) => sale.installment_plan_id === scheduledSale.json?.data?.installment_plan_id).length === 1
     && Number(prePaymentSales.json.data.find((sale) => sale.installment_plan_id === scheduledSale.json?.data?.installment_plan_id)?.amount) === 200);
   const outOfOrderCharge = await api('PATCH', `/api/management/sales/installments/${scheduledSale.json?.data?.installment_plan_id}`, tok(master), {
-    installment_number: 3, next_installment_due_date: '2026-10-10', next_installment_amount: 350,
+    installment_number: 3, next_installment_due_date: outOfOrderDueDate, next_installment_amount: 350,
     installment_frequency: 'monthly',
   });
   check('sistema impede vencimento de parcela posterior antes da anterior', outOfOrderCharge.status === 400,
     JSON.stringify(outOfOrderCharge.json));
   const editThirdCharge = await api('PATCH', `/api/management/sales/installments/${scheduledSale.json?.data?.installment_plan_id}`, tok(master), {
-    installment_number: 3, next_installment_due_date: '2026-11-17', next_installment_amount: 350,
+    installment_number: 3, next_installment_due_date: adjustedThirdDueDate, next_installment_amount: 350,
     installment_frequency: 'monthly',
   });
   const confirmSecondCharge = await api('POST', '/api/management/sales', tok(master), {
@@ -1122,12 +1169,12 @@ async function main() {
     installment_frequency: 'monthly', payment_method: 'pix', closing_method: 'remoto',
   });
   const salesAfterSecondPayment = await api('GET', `/api/management/sales?seller_id=${metaSeller.id}&month=10&year=2026`, tok(master));
-  const novemberAfterSecondPayment = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
+  const novemberAfterSecondPayment = await api('GET', `/api/management/sales/installments?month=${secondCompetence.month}&year=${secondCompetence.year}`, tok(master));
   const thirdAfterPayment = novemberAfterSecondPayment.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
   check('cada cobrança futura pode ser ajustada sem mexer no valor recebido', editThirdCharge.status === 200
     && Number(editThirdCharge.json.data.amount) === 200
     && Number(thirdAfterPayment?.pending_amount) === 350
-    && String(thirdAfterPayment?.next_installment_due_date).substring(0, 10) === '2026-11-17',
+    && String(thirdAfterPayment?.next_installment_due_date).substring(0, 10) === adjustedThirdDueDate,
   JSON.stringify({ editThirdCharge: editThirdCharge.json, thirdAfterPayment }));
   check('confirmar uma parcela lança somente o valor realmente recebido e mantém a próxima previsão', confirmSecondCharge.status === 201
     && Number(confirmSecondCharge.json.data.amount) === 290
@@ -1137,11 +1184,11 @@ async function main() {
     && Number(thirdAfterPayment?.pending_amount) === 350,
   JSON.stringify({ confirmSecondCharge: confirmSecondCharge.json, salesAfterSecondPayment: salesAfterSecondPayment.json?.data, thirdAfterPayment }));
   const deleteLatestChargeSale = await api('DELETE', `/api/management/sales/${confirmSecondCharge.json?.data?.id}`, tok(master));
-  const octoberAfterDelete = await api('GET', '/api/management/sales/installments?month=10&year=2026', tok(master));
+  const octoberAfterDelete = await api('GET', `/api/management/sales/installments?month=${firstCompetence.month}&year=${firstCompetence.year}`, tok(master));
   const reopenedSecondCharge = octoberAfterDelete.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
   check('excluir o último recebimento reabre a cobrança prevista em vez de deixá-la marcada como paga', deleteLatestChargeSale.status === 200
     && Number(reopenedSecondCharge?.pending_amount) === 300
-    && String(reopenedSecondCharge?.next_installment_due_date).substring(0, 10) === '2026-10-15',
+    && String(reopenedSecondCharge?.next_installment_due_date).substring(0, 10) === agendaFirstDue,
   JSON.stringify({ deleteLatestChargeSale: deleteLatestChargeSale.json, reopenedSecondCharge }));
 
   // ── FIM ──

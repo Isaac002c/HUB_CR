@@ -1528,8 +1528,10 @@ async function updateSale(id, data, tenantId) {
     ? (data.installment_frequency || current.installment_frequency || 'monthly')
     : null;
   const settled = installmentChanged
-    ? (Boolean(data.is_settlement) || (nextInstallmentTotal && nextInstallmentNumber >= nextInstallmentTotal))
-    : current.is_settlement;
+    ? (Boolean(data.is_settlement) || Boolean(
+      nextInstallmentTotal && Number(nextInstallmentNumber) >= Number(nextInstallmentTotal)
+    ))
+    : Boolean(current.is_settlement);
 
   const r = await pool.query(
     `UPDATE sales SET

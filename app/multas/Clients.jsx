@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getClients, searchClients, createClient, updateClient, deleteClient } from '../lib/clientsAPI';
 import { getConsultants } from '../lib/calendarAPI';
+import { clientDetailHref } from '../lib/clientNavigation';
 
 const toInputDate = (value) => (!value ? '' : value.substring(0, 10));
 
@@ -56,7 +57,6 @@ const CLIENTS_PAGE_STATUS_OPTIONS = CLIENT_STATUS_OPTIONS.filter(({ value }) => 
   value === 'negociacao' || value === 'fechado'
 ));
 const CLIENTS_PAGE_STATUSES = new Set(CLIENTS_PAGE_STATUS_OPTIONS.map(({ value }) => value));
-const CLIENT_LIST_RETURN_PATH = '/dashboard?module=multas&tab=clients';
 const CLIENT_LIST_RETURN_STATE_KEY = 'cr:clients:return-state';
 
 const STATUS_LABELS = Object.fromEntries(CLIENT_STATUS_OPTIONS.map((option) => [option.value, option.label]));
@@ -196,8 +196,7 @@ export default function MultasClients() {
       }));
     } catch (_) {}
 
-    const returnParams = new URLSearchParams({ returnTo: CLIENT_LIST_RETURN_PATH });
-    router.push(`/multas/clients/${encodeURIComponent(clientId)}?${returnParams.toString()}`);
+    router.push(clientDetailHref(clientId));
   };
 
   const validateForm = () => {
