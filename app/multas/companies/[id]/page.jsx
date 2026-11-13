@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import {
   getCompanyById, updateCompany,
   getVehicles, setVehicleStatus, deleteVehicle,
@@ -12,6 +12,7 @@ import {
 } from '../../../lib/processConstants';
 import DocumentsSection from '../../components/DocumentsSection';
 import VehicleFormModal from '../../components/VehicleFormModal';
+import { safeClientReturnPath, withCurrentPageReturnTo } from '../../../lib/clientNavigation';
 
 // ─── Helpers locais ───────────────────────────────────────────────────────────
 const maskPhone = (value) => {
@@ -29,7 +30,14 @@ const RELATORIO_MENSAL_CAT = 'Relatório Mensal';
 export default function CompanyDetail() {
   const router = useRouter();
   const params = useParams();
+  const searchParams = useSearchParams();
   const companyId = params.id;
+  const requestedReturnTo = searchParams.get('returnTo');
+  const hasReturnTarget = Boolean(requestedReturnTo);
+  const returnTarget = hasReturnTarget
+    ? safeClientReturnPath(requestedReturnTo)
+    : '/dashboard?module=multas&tab=companies';
+  const returnToPreviousPage = () => router.replace(returnTarget);
 
   const currentUser = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
   const isAdmin = ['master','admin','super_admin'].includes(currentUser?.role);
@@ -144,7 +152,7 @@ export default function CompanyDetail() {
     catch (err) { setError(err.message); } // bloqueado se houver processo vinculado
   };
 
-  const goToVehicle = (vid) => router.push(`/multas/companies/${companyId}/vehicles/${vid}`);
+  const goToVehicle = (vid) => router.push(withCurrentPageReturnTo(`/multas/companies/${companyId}/vehicles/${vid}`));
 
   if (loading) return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 0', gap: 14 }}>
@@ -154,7 +162,7 @@ export default function CompanyDetail() {
   );
   if (!company) return (
     <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
-      Empresa não encontrada. <button className="btn-secondary" onClick={() => router.push('/dashboard?module=multas&tab=companies')}>Voltar</button>
+      Empresa não encontrada. <button className="btn-secondary" onClick={returnToPreviousPage}>Voltar</button>
     </div>
   );
 
@@ -163,8 +171,8 @@ export default function CompanyDetail() {
 
       {/* Voltar + cabeçalho */}
       <div>
-        <button onClick={() => router.push('/dashboard?module=multas&tab=companies')} className="btn-secondary" style={{ marginBottom: 14 }}>
-          ← Empresas
+        <button onClick={returnToPreviousPage} className="btn-secondary" style={{ marginBottom: 14 }}>
+          {hasReturnTarget ? '← Voltar à página anterior' : '← Empresas'}
         </button>
         <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 20, display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ width: 52, height: 52, borderRadius: 12, background: 'rgba(117,21,24,0.1)', color: '#751518', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 800, flexShrink: 0 }}>

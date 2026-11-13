@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { getContractDashboard, getStageClients, getDeferred, getRealInfractorAlerts } from '../lib/contractsAPI';
 import { getClients } from '../lib/clientsAPI';
 import { getUpcomingEvents, getEventsRange } from '../lib/calendarAPI';
 import { getKanbanLeads } from '../lib/multasLeadsAPI';
-import { clientDetailHref } from '../lib/clientNavigation';
+import { rentalProcessHref } from '../lib/clientNavigation';
 import UserHome from './UserHome';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
@@ -131,6 +131,10 @@ function StageCard({ groupKey, info, count, active, onClick }) {
 // Painel expandido da etapa
 function StagePanel({ groupKey, info, stageData, onClose }) {
   const router = useRouter();
+  const openProcess = (process) => {
+    const href = rentalProcessHref(process);
+    if (href) router.push(href);
+  };
 
   return (
     <div className="md-stage-panel">
@@ -165,7 +169,7 @@ function StagePanel({ groupKey, info, stageData, onClose }) {
                     <div
                       key={`${c.fine_id}`}
                       className="md-stage-client-card"
-                      onClick={() => router.push(clientDetailHref(c.client_id))}
+                      onClick={() => openProcess(c)}
                       role="button"
                       tabIndex={0}
                     >
@@ -200,8 +204,8 @@ function DeferidosPanel({ items, onClose }) {
   const router = useRouter();
   const color = '#15803d';
   const open = (it) => {
-    if (it.client_id)       router.push(clientDetailHref(it.client_id));
-    else if (it.company_id) router.push(`/multas/companies/${it.company_id}`);
+    const href = rentalProcessHref(it);
+    if (href) router.push(href);
   };
   return (
     <div className="md-stage-panel">
@@ -257,9 +261,8 @@ function RealInfractorPanel({ items, onClose }) {
   const router = useRouter();
   const color = REAL_INFRATOR_INFO.color;
   const open = (it) => {
-    if (it.client_id) router.push(clientDetailHref(it.client_id));
-    else if (it.company_id && it.vehicle_id) router.push(`/multas/companies/${it.company_id}/vehicles/${it.vehicle_id}`);
-    else if (it.company_id) router.push(`/multas/companies/${it.company_id}`);
+    const href = rentalProcessHref(it);
+    if (href) router.push(href);
   };
   return (
     <div className="md-stage-panel">
@@ -301,6 +304,7 @@ function RealInfractorPanel({ items, onClose }) {
 
 export default function MultasDashboard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [currentUser, setCurrentUser] = useState(null);
   const [clients,    setClients]    = useState([]);
   const [contracts,  setContracts]  = useState(null);
@@ -312,7 +316,9 @@ export default function MultasDashboard() {
   const [weekEvents, setWeekEvents] = useState([]);   // eventos de hoje a +6 dias (card Agendamentos)
   const [kanbanActive, setKanbanActive] = useState(0);
   const [loading,    setLoading]    = useState(true);
-  const [expandedStage, setExpandedStage] = useState(null); // 'defesa' | 'inst1' | 'inst2' | 'deferido' | 'real-infractor'
+  const initialStage = searchParams.get('stage');
+  const validStageKeys = [...Object.keys(STAGE_GROUPS), 'deferido', 'real-infractor'];
+  const [expandedStage, setExpandedStage] = useState(() => validStageKeys.includes(initialStage) ? initialStage : null);
 
   useEffect(() => {
     const userData = localStorage.getItem('user');
@@ -381,7 +387,19 @@ export default function MultasDashboard() {
   const realInfratorTotal = realInfractorAlerts.length;
 
   const handleStageClick = (key) => {
-    setExpandedStage(prev => prev === key ? null : key);
+    const nextStage = expandedStage === key ? null : key;
+    setExpandedStage(nextStage);
+    const url = new URL(window.location.href);
+    if (nextStage) url.searchParams.set('stage', nextStage);
+    else url.searchParams.delete('stage');
+    router.replace(`${url.pathname}${url.search}${url.hash}`, { scroll: false });
+  };
+
+  const closeStagePanel = () => {
+    setExpandedStage(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('stage');
+    router.replace(`${url.pathname}${url.search}${url.hash}`, { scroll: false });
   };
 
   return (
@@ -464,14 +482,14 @@ export default function MultasDashboard() {
             groupKey={expandedStage}
             info={STAGE_GROUPS[expandedStage]}
             stageData={stageData}
-            onClose={() => setExpandedStage(null)}
+            onClose={closeStagePanel}
           />
         )}
         {expandedStage === 'deferido' && (
-          <DeferidosPanel items={deferidosList} onClose={() => setExpandedStage(null)} />
+          <DeferidosPanel items={deferidosList} onClose={closeStagePanel} />
         )}
         {expandedStage === 'real-infractor' && (
-          <RealInfractorPanel items={realInfractorAlerts} onClose={() => setExpandedStage(null)} />
+          <RealInfractorPanel items={realInfractorAlerts} onClose={closeStagePanel} />
         )}
 
       </div>

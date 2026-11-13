@@ -224,7 +224,7 @@ export default function MultasClients() {
         birth_date: displayToIso(formData.birth_date),
         first_cnh:  displayToIso(formData.first_cnh),
       };
-      if (editingClient?.status === 'fechado' && canManageConsultant) {
+      if (editingClient && ['negociacao', 'fechado'].includes(editingClient.status) && canManageConsultant) {
         payload.consultant_id = consultant_id;
       }
       if (editingClient) {
@@ -643,7 +643,7 @@ export default function MultasClients() {
                 </select>
               </div>
 
-              {editingClient?.status === 'fechado' && canManageConsultant && (
+              {editingClient && ['negociacao', 'fechado'].includes(editingClient.status) && canManageConsultant && (
                 <div className="form-group">
                   <label>Consultor responsável</label>
                   <select value={formData.consultant_id} onChange={set('consultant_id')}>

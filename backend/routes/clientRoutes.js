@@ -174,12 +174,12 @@ router.put('/:id', async (req, res) => {
     const requestedConsultantId = req.body.consultant_id || null;
     const changesConsultant = consultantWasSent && requestedConsultantId !== existingClient.created_by;
     if (changesConsultant) {
-      if (existingClient.status !== 'fechado') {
-        return res.status(400).json({ success: false, error: 'A troca de consultor está disponível somente para clientes fechados' });
+      if (!['negociacao', 'fechado'].includes(existingClient.status)) {
+        return res.status(400).json({ success: false, error: 'A troca de consultor está disponível para clientes em negociação ou fechados' });
       }
       const role = String(req.userRole || '').toLowerCase();
       if (!['master', 'supervisor'].includes(role)) {
-        return res.status(403).json({ success: false, error: 'Somente o MASTER ou a Supervisão podem alterar o consultor de um cliente fechado' });
+        return res.status(403).json({ success: false, error: 'Somente o MASTER ou a Supervisão podem alterar o consultor de um cliente' });
       }
       if (!requestedConsultantId || !UUID_PATTERN.test(requestedConsultantId)) {
         return res.status(400).json({ success: false, error: 'Selecione um consultor válido' });

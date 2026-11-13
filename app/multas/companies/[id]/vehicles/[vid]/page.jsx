@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import {
   getCompanyById, getVehicleById, getVehicleFines, linkFineToVehicle,
 } from '../../../../../lib/companiesAPI';
@@ -14,6 +14,7 @@ import {
 import ProtocolPanel from '../../../../components/ProtocolPanel';
 import DocumentsSection from '../../../../components/DocumentsSection';
 import VehicleFormModal from '../../../../components/VehicleFormModal';
+import { safeClientReturnPath } from '../../../../../lib/clientNavigation';
 
 const PAGE = 25;
 const VEHICLE_DOC_TYPES = ['CRLV', 'CRV / DUT', 'Comprovante', 'Procuração', 'Nota Fiscal', 'Outros'];
@@ -51,8 +52,15 @@ const displayToIso = (v) => {
 export default function VehicleDetail() {
   const router = useRouter();
   const params = useParams();
+  const searchParams = useSearchParams();
   const companyId = params.id;
   const vehicleId = params.vid;
+  const requestedReturnTo = searchParams.get('returnTo');
+  const hasReturnTarget = Boolean(requestedReturnTo);
+  const returnTarget = hasReturnTarget
+    ? safeClientReturnPath(requestedReturnTo)
+    : `/multas/companies/${companyId}`;
+  const returnToPreviousPage = () => router.replace(returnTarget);
 
   const currentUser = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
   const isAdmin = ['master','admin','super_admin'].includes(currentUser?.role);
@@ -202,7 +210,7 @@ export default function VehicleDetail() {
   );
   if (!vehicle) return (
     <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
-      Veículo não encontrado. <button className="btn-secondary" onClick={() => router.push(`/multas/companies/${companyId}`)}>Voltar à empresa</button>
+      Veículo não encontrado. <button className="btn-secondary" onClick={returnToPreviousPage}>{hasReturnTarget ? 'Voltar à página anterior' : 'Voltar à empresa'}</button>
     </div>
   );
 
@@ -211,8 +219,8 @@ export default function VehicleDetail() {
 
       {/* Voltar + cabeçalho do veículo */}
       <div>
-        <button onClick={() => router.push(`/multas/companies/${companyId}`)} className="btn-secondary" style={{ marginBottom: 14 }}>
-          ← {company?.razao_social || 'Empresa'}
+        <button onClick={returnToPreviousPage} className="btn-secondary" style={{ marginBottom: 14 }}>
+          {hasReturnTarget ? '← Voltar à página anterior' : `← ${company?.razao_social || 'Empresa'}`}
         </button>
         <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 20, display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ width: 52, height: 52, borderRadius: 12, background: 'rgba(117,21,24,0.1)', color: '#751518', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, flexShrink: 0, fontFamily: 'monospace' }}>

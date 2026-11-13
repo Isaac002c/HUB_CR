@@ -1,11 +1,24 @@
 const DEFAULT_CLIENT_RETURN_PATH = '/dashboard?module=multas&tab=clients';
 
-export const clientDetailHref = (clientId) => {
+export const withCurrentPageReturnTo = (href, fallback = DEFAULT_CLIENT_RETURN_PATH) => {
   const returnTo = typeof window === 'undefined'
-    ? DEFAULT_CLIENT_RETURN_PATH
+    ? fallback
     : `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  const query = new URLSearchParams({ returnTo });
-  return `/multas/clients/${encodeURIComponent(clientId)}?${query.toString()}`;
+  const separator = href.includes('?') ? '&' : '?';
+  return `${href}${separator}${new URLSearchParams({ returnTo }).toString()}`;
+};
+
+export const clientDetailHref = (clientId) =>
+  withCurrentPageReturnTo(`/multas/clients/${encodeURIComponent(clientId)}`);
+
+export const rentalProcessHref = ({ client_id, company_id, vehicle_id }) => {
+  if (client_id) return clientDetailHref(client_id);
+  if (!company_id) return null;
+  const companyPath = `/multas/companies/${encodeURIComponent(company_id)}`;
+  const destination = vehicle_id
+    ? `${companyPath}/vehicles/${encodeURIComponent(vehicle_id)}`
+    : companyPath;
+  return withCurrentPageReturnTo(destination, '/dashboard?module=multas&tab=dashboard');
 };
 
 export const safeClientReturnPath = (value) => {

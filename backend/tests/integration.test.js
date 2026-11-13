@@ -416,6 +416,26 @@ async function main() {
   check('listagem reflete o novo consultor do cliente', transferredClient?.created_by === s1.id
     && transferredClient?.consultant_name === s1.name, JSON.stringify(transferredClient));
 
+  console.log('\n== Cliente em negociação: troca de consultor pelo MASTER e Supervisão ==');
+  const negotiationTransferClient = await api('POST', '/api/clients', tok(s1), {
+    name: 'Cliente em Negociação para Transferência', status: 'negociacao',
+  });
+  const negotiationTransferBody = { ...negotiationTransferClient.json.data, consultant_id: s2.id };
+  check('administrador não troca consultor de cliente em negociação',
+    (await api('PUT', `/api/clients/${negotiationTransferClient.json.data.id}`, tok(admin), negotiationTransferBody)).status === 403);
+  check('consultor não troca consultor de cliente em negociação',
+    (await api('PUT', `/api/clients/${negotiationTransferClient.json.data.id}`, tok(s1), negotiationTransferBody)).status === 403);
+  const negotiationSupervisorTransfer = await api('PUT', `/api/clients/${negotiationTransferClient.json.data.id}`, tok(sup), negotiationTransferBody);
+  check('Supervisão troca o consultor de um cliente em negociação', negotiationSupervisorTransfer.status === 200
+    && negotiationSupervisorTransfer.json.data.created_by === s2.id,
+  JSON.stringify(negotiationSupervisorTransfer.json));
+  const negotiationMasterTransfer = await api('PUT', `/api/clients/${negotiationTransferClient.json.data.id}`, tok(master), {
+    ...negotiationTransferBody, consultant_id: s1.id,
+  });
+  check('MASTER troca o consultor de um cliente em negociação', negotiationMasterTransfer.status === 200
+    && negotiationMasterTransfer.json.data.created_by === s1.id,
+  JSON.stringify(negotiationMasterTransfer.json));
+
   console.log('\n== Exceções globais: Deferidos + Agenda ==');
   const defS = await api('GET', '/api/contracts/deferred', tok(s1));
   check('seller vê TODOS os deferidos do tenant (2)', defS.status === 200 && defS.json.data.length === 2, 'got ' + JSON.stringify(defS.json?.data?.length));

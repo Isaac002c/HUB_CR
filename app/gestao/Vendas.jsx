@@ -80,8 +80,50 @@ export default function Vendas() {
   };
 
   const submitSchedule = async (form) => {
+    const installment = scheduleModal;
     try {
-      await updateInstallmentSchedule(scheduleModal.installment_plan_id, form);
+      const receivedAmount = Number(form.received_amount || 0);
+      if (receivedAmount > 0) {
+        if (!installment?.seller_id) throw new Error('Esta cobrança não possui um responsável válido para registrar o recebimento.');
+        const savedDueDate = String(installment.next_installment_due_date || '').substring(0, 10);
+        const savedExpectedAmount = Number(installment.expected_amount ?? installment.pending_amount ?? installment.amount ?? 0);
+        const scheduleChanged = form.next_installment_due_date !== savedDueDate
+          || Math.round(Number(form.next_installment_amount) * 100) !== Math.round(savedExpectedAmount * 100);
+        if (scheduleChanged) {
+          // Persist the edited projection first so the receipt is checked against
+          // the same amount/date the user sees in this modal.
+          await updateInstallmentSchedule(installment.installment_plan_id, form);
+        }
+        const serviceName = installment.service_name || installment.description || '';
+        const installmentNumber = Number(installment.next_installment_number);
+        const installmentTotal = Number(installment.installment_total);
+        const finalInstallment = installmentNumber >= installmentTotal;
+        await createSale({
+          seller_id: installment.seller_id,
+          seller_display_name: installment.seller_name,
+          client_id: installment.client_id || null,
+          company_id: installment.company_id || null,
+          lead_id: installment.lead_id || null,
+          fine_id: installment.fine_id || null,
+          closed_at: form.received_at,
+          customer_name: installment.customer_name,
+          service_name: serviceName,
+          description: serviceName,
+          amount: receivedAmount,
+          installment_number: installmentNumber,
+          installment_total: installmentTotal,
+          installment_plan_id: installment.installment_plan_id,
+          installment_frequency: installment.installment_frequency || 'monthly',
+          next_installment_due_date: finalInstallment ? null : form.next_installment_due_date,
+          next_installment_amount: finalInstallment ? null : Number(form.next_installment_amount),
+          is_settlement: finalInstallment,
+          payment_method: form.payment_method,
+          closing_method: installment.closing_method || 'remoto',
+          status: 'confirmed',
+        });
+      } else {
+        await updateInstallmentSchedule(installment.installment_plan_id, form);
+      }
       setScheduleModal(null); await load();
       return true;
     } catch (err) { alert(err.message); return false; }
@@ -457,16 +499,24 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
     next_installment_due_date: String(installment.next_installment_due_date || '').substring(0, 10),
-    next_installment_amount: installment.pending_amount ?? installment.amount ?? '',
+    next_installment_amount: installment.expected_amount ?? installment.pending_amount ?? installment.amount ?? '',
     installment_frequency: installment.installment_frequency || 'monthly',
     installment_number: installment.next_installment_number,
   });
+  const [payment, setPayment] = useState({
+    amount: '',
+    closed_at: localIsoDate(),
+    payment_method: installment.payment_method || 'a_vista',
+  });
   const set = (key) => (event) => setForm((previous) => ({ ...previous, [key]: event.target.value }));
+  const setPaymentField = (key) => (event) => setPayment((previous) => ({ ...previous, [key]: event.target.value }));
+  const amountNow = Number(payment.amount) || 0;
+  const balanceAfterPayment = Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0) - amountNow, 0);
 
   return <div className="modal-overlay" onClick={onClose}>
     <div className="modal-content" style={{ maxWidth: 650 }} onClick={(event) => event.stopPropagation()}>
       <div className="modal-header">
-        <div><h2 style={{ fontSize: 19, fontWeight: 750, margin: 0 }}>Ajustar cobrança programada</h2><div style={muted}>A alteração fica na agenda e não cria uma venda.</div></div>
+        <div><h2 style={{ fontSize: 19, fontWeight: 750, margin: 0 }}>Ajustar cobrança programada</h2><div style={muted}>Ajuste a previsão e informe abaixo qualquer valor já recebido.</div></div>
         <button className="btn-close" onClick={onClose}>×</button>
       </div>
       <form className="modal-form" onSubmit={async (event) => {
@@ -474,12 +524,19 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
         if (submitting) return;
         if (!form.next_installment_due_date) return alert('Informe o vencimento da cobrança.');
         if (!form.next_installment_amount || Number(form.next_installment_amount) <= 0) return alert('Informe um valor previsto válido.');
+        if (amountNow > 0 && !installment.is_next_installment) return alert('É necessário registrar primeiro o recebimento da parcela anterior.');
+        if (amountNow > 0 && !payment.closed_at) return alert('Informe a data em que o pagamento foi recebido.');
+        if (amountNow > Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0)) return alert('O valor recebido não pode superar o saldo desta cobrança.');
+        if (amountNow > 0 && !payment.payment_method) return alert('Selecione a forma de pagamento.');
         setSubmitting(true);
         const succeeded = await onSubmit({
           next_installment_due_date: form.next_installment_due_date,
           next_installment_amount: Number(form.next_installment_amount),
           installment_frequency: form.installment_frequency,
           installment_number: form.installment_number,
+          received_amount: amountNow,
+          received_at: payment.closed_at,
+          payment_method: payment.payment_method,
         });
         if (!succeeded) setSubmitting(false);
       }}>
@@ -495,8 +552,25 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
           <Field label="Parcela"><input value={`${installment.next_installment_number}/${installment.installment_total}`} readOnly /></Field>
           <Field label="Periodicidade"><input value={installmentFrequencyLabel(form.installment_frequency)} readOnly /></Field>
         </div>
-        <div style={paymentConfirmationInfo}><strong>Importante:</strong> salvar aqui não soma valor ao faturamento. A receita só será lançada em “Confirmar pagamento”.</div>
-        <div className="form-actions"><button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>Cancelar</button><button type="submit" className="btn-primary" disabled={submitting}>{submitting ? 'Salvando...' : 'Salvar cobrança'}</button></div>
+        <div style={paymentConfirmationInfo}><strong>Previsto nesta cobrança:</strong> {formatBRL(form.next_installment_amount)} · <strong>Já recebido:</strong> {formatBRL(installment.received_amount || 0)} · <strong>Saldo antes deste recebimento:</strong> {formatBRL(Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0))}.</div>
+        <section style={installmentPaymentCard}>
+          <div>
+            <strong style={{ color: '#0f172a', fontSize: 14 }}>Registrar recebimento nesta cobrança</strong>
+            <div style={{ ...muted, marginTop: 3 }}>Informe quanto entrou. Esse valor vai para Vendas pela data real do recebimento; o restante continua pendente.</div>
+          </div>
+          {installment.is_next_installment ? <>
+            <div className="form-row">
+              <Field label="Valor recebido agora (R$)"><input type="number" step="0.01" min="0" value={payment.amount} onChange={setPaymentField('amount')} /></Field>
+              <Field label="Data do recebimento"><input type="date" value={payment.closed_at} onChange={setPaymentField('closed_at')} /></Field>
+              <Field label="Forma de pagamento"><select value={payment.payment_method} onChange={setPaymentField('payment_method')}>{PAYMENT_METHODS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
+            </div>
+            <div style={{ ...muted, marginTop: -5 }}>
+              Saldo após este recebimento: <strong>{formatBRL(balanceAfterPayment)}</strong>{amountNow > 0 && balanceAfterPayment > 0 ? ' · continuará em aberto.' : amountNow > 0 ? ' · será quitada.' : ''}
+            </div>
+          </> : <div style={{ ...muted, padding: '8px 0' }}>O recebimento fica disponível depois que a parcela anterior for registrada.</div>}
+        </section>
+        <div style={{ ...muted, marginTop: -4 }}>Sem informar valor recebido, o botão abaixo salva apenas o vencimento e o valor previsto.</div>
+        <div className="form-actions"><button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>Cancelar</button><button type="submit" className="btn-primary" disabled={submitting}>{submitting ? 'Salvando...' : amountNow > 0 ? 'Salvar e confirmar recebimento' : 'Salvar ajuste da cobrança'}</button></div>
       </form>
     </div>
   </div>;
@@ -566,6 +640,7 @@ const scheduleEditorRow = { display: 'grid', gridTemplateColumns: 'repeat(2, min
 const checkStyle = { display: 'flex', alignItems: 'center', gap: 8, color: '#334155', fontSize: 13, fontWeight: 650 };
 const commissionInfo = { background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 9, padding: '11px 13px' };
 const paymentConfirmationInfo = { background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e3a8a', borderRadius: 9, padding: '10px 12px', fontSize: 12 };
+const installmentPaymentCard = { display: 'flex', flexDirection: 'column', gap: 10, background: '#f8fafc', border: '1px solid #dbeafe', borderRadius: 9, padding: 12 };
 const followUpCard = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden' };
 const followUpHeader = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '14px 18px', borderBottom: '1px solid #f1f5f9' };
 const followUpCount = { background: '#fff7ed', color: '#c2410c', borderRadius: 999, padding: '5px 10px', fontSize: 12, fontWeight: 750 };

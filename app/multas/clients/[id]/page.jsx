@@ -388,7 +388,7 @@ export default function ClientDetail() {
         birth_date: displayToIso(clientForm.birth_date),
         first_cnh:  displayToIso(clientForm.first_cnh),
       };
-      if (canManageConsultant && client.status === 'fechado') {
+      if (canManageConsultant && ['negociacao', 'fechado'].includes(client.status)) {
         payload.consultant_id = consultant_id;
       }
       await updateClient(client.id, payload);
@@ -1220,7 +1220,7 @@ export default function ClientDetail() {
                   ))}
                 </select>
               </div>
-              {canManageConsultant && client.status === 'fechado' && (
+              {canManageConsultant && ['negociacao', 'fechado'].includes(client.status) && (
                 <div className="form-group">
                   <label>Consultor responsável</label>
                   <select value={clientForm.consultant_id || ''} onChange={setC('consultant_id')} required>
