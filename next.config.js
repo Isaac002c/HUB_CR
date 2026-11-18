@@ -8,6 +8,7 @@ const PUBLIC_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 const nextConfig = {
   reactStrictMode: true,
   turbopack: { root: __dirname },
+  experimental: { agentUpgrade: 'security' },
 
   async rewrites() {
     return [
