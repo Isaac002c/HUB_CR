@@ -104,7 +104,7 @@ function mutationError(res, err, context) {
   }
   if (err.code === '23505') return res.status(409).json({ success: false, error: 'Já existe um cadastro com esses dados.' });
   if (err.code === '23514') return res.status(400).json({ success: false, error: 'Os dados informados não atendem às regras do cadastro.' });
-  if (['INVALID_TEAM', 'INVALID_SUPERVISOR', 'INVALID_COLLABORATOR', 'INVALID_SELLER', 'INVALID_INSTALLMENT_PLAN', 'INVALID_INSTALLMENT_SEQUENCE', 'INVALID_INSTALLMENT_DUE_DATE'].includes(err.code)) {
+  if (['INVALID_TEAM', 'INVALID_SUPERVISOR', 'INVALID_COLLABORATOR', 'INVALID_SELLER', 'INVALID_INSTALLMENT_PLAN', 'INVALID_INSTALLMENT_SEQUENCE', 'INVALID_INSTALLMENT_DUE_DATE', 'INVALID_INSTALLMENT_AMOUNT', 'INVALID_INSTALLMENT_PAYMENT_EDIT', 'INVALID_INSTALLMENT_PAYMENT_ORDER', 'SALE_CONCURRENT_UPDATE'].includes(err.code)) {
     return res.status(400).json({ success: false, error: err.message });
   }
   if (err.code === 'FORBIDDEN') return res.status(403).json({ success: false, error: err.message });
@@ -165,6 +165,7 @@ function saleCommercialFields(body, { partial = false } = {}) {
     || body.installment_plan_id !== undefined
     || body.next_installment_due_date !== undefined
     || body.installment_schedule !== undefined
+    || body.installment_schedule_adjustment !== undefined
     || body.is_settlement !== undefined
     || body.installment_frequency !== undefined;
   let installmentNumber = null, installmentTotal = null;
@@ -241,6 +242,27 @@ function saleCommercialFields(body, { partial = false } = {}) {
         result.next_installment_due_date = schedule[0].due_date;
         result.next_installment_amount = schedule[0].expected_amount;
       }
+    }
+    if (body.installment_schedule_adjustment !== undefined) {
+      const adjustment = body.installment_schedule_adjustment;
+      if (!adjustment || typeof adjustment !== 'object' || Array.isArray(adjustment)
+        || !planId || !installmentTotal || installmentNumber <= 1) {
+        throw Object.assign(new Error('Ajuste de cobrança inválido.'), { code: 'VALIDATION' });
+      }
+      const dueDate = cleanText(adjustment.next_installment_due_date, 'Vencimento da cobrança', 10);
+      const expectedAmount = Number(adjustment.next_installment_amount);
+      const parsedDate = dueDate && /^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+        ? new Date(`${dueDate}T12:00:00Z`)
+        : null;
+      if (!parsedDate || Number.isNaN(parsedDate.getTime())
+        || parsedDate.toISOString().substring(0, 10) !== dueDate
+        || !Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+        throw Object.assign(new Error('Revise o vencimento e o valor previsto da cobrança.'), { code: 'VALIDATION' });
+      }
+      result.installment_schedule_adjustment = {
+        next_installment_due_date: dueDate,
+        next_installment_amount: expectedAmount,
+      };
     }
   }
   if (!partial || body.payment_method !== undefined) result.payment_method = paymentMethod;
@@ -1006,6 +1028,42 @@ router.get('/sales/installments', async (req, res) => {
   }
 });
 
+router.delete('/sales/installments/:planId/:installmentNumber', requireRole('master'), async (req, res) => {
+  try {
+    if (!UUID_PATTERN.test(req.params.planId)) {
+      return res.status(400).json({ success: false, error: 'Parcelamento inválido.' });
+    }
+    const installmentNumber = Number(req.params.installmentNumber);
+    if (!Number.isInteger(installmentNumber) || installmentNumber < 2) {
+      return res.status(400).json({ success: false, error: 'Parcela inválida.' });
+    }
+    const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId);
+    if (!existing) return res.status(404).json({ success: false, error: 'Cobrança não encontrada.' });
+    const cancelled = await mgmt.cancelInstallmentSchedule(
+      req.tenantId, req.params.planId, installmentNumber
+    );
+    if (cancelled?.blocked) {
+      return res.status(409).json({
+        success: false,
+        error: 'Para manter a sequência, cancele primeiro as parcelas seguintes, começando pela última.',
+      });
+    }
+    if (!cancelled) return res.status(404).json({ success: false, error: 'Cobrança não encontrada ou já cancelada.' });
+    await logActivity({
+      tenant_id: req.tenantId,
+      user_id: req.userId,
+      action: 'cancel',
+      entity_type: 'installment_schedule',
+      entity_id: cancelled.schedule_id,
+      description: 'Cobrança programada cancelada pelo master e removida das pendências',
+      metadata: { installment_plan_id: req.params.planId, installment_number: installmentNumber },
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    return mutationError(res, err, 'sales/installments/cancel');
+  }
+});
+
 router.patch('/sales/installments/:planId', async (req, res) => {
   try {
     if (!UUID_PATTERN.test(req.params.planId)) {
@@ -1163,6 +1221,13 @@ router.put('/sales/:id', async (req, res) => {
   try {
     const existing = await mgmt.getSaleById(req.params.id, req.tenantId);
     if (!existing) return res.status(404).json({ success: false, error: 'Venda não encontrada' });
+    if (existing.installment_schedule_id
+      && !['master', 'supervisor'].includes(String(req.userRole || '').toLowerCase())) {
+      return res.status(403).json({
+        success: false,
+        error: 'Somente o MASTER ou a Supervisão podem editar recebimentos de cobranças programadas.',
+      });
+    }
     const level = access.accessLevel(req.userRole, 'gestao');
     // Consultor só edita a própria venda
     if (level === 'own' && existing.seller_id !== req.userId) {
@@ -1174,23 +1239,39 @@ router.put('/sales/:id', async (req, res) => {
         && (visibleRole === 'seller' || existing.seller_id === req.userId);
       if (!visibleSale) return res.status(403).json({ success: false, error: 'Venda fora da sua equipe.' });
     }
-    const sellerId = level === 'own' ? req.userId : (req.body.seller_id || existing.seller_id);
-    const displayNameWasSent = Object.prototype.hasOwnProperty.call(req.body, 'seller_display_name');
-    let seller = null;
-    if (sellerId !== existing.seller_id || level !== 'team' || displayNameWasSent) {
-      seller = await assertSellerAllowed(req, sellerId);
-    }
-    const seller_display_name = displayNameWasSent
-      ? resolveSalesResponsibleDisplayName(seller, req.body.seller_display_name)
-      : (sellerId !== existing.seller_id ? resolveSalesResponsibleDisplayName(seller) : undefined);
     if (req.body.amount !== undefined && Number(req.body.amount) <= 0) {
       return res.status(400).json({ success: false, error: 'Valor da venda deve ser maior que zero.' });
     }
-    const commercial = saleCommercialFields(req.body, { partial: true });
-    const sale = await mgmt.updateSale(req.params.id, {
-      ...req.body, ...commercial, seller_id: sellerId, seller_display_name,
-    }, req.tenantId);
-    await logActivity({ tenant_id: req.tenantId, user_id: req.userId, action: 'update', entity_type: 'sale', entity_id: req.params.id, description: 'Venda atualizada', metadata: { before: { amount: existing.amount, status: existing.status }, after: req.body } });
+    let updateData;
+    if (existing.installment_schedule_id) {
+      // Recebimentos ligados à agenda só podem mudar seus dados efetivamente
+      // recebidos. A responsabilidade, a parcela e o status continuam ligados
+      // à cobrança; seu valor previsto e vencimento são ajustados na agenda.
+      const receiptFields = {
+        closed_at: req.body.closed_at,
+        customer_name: req.body.customer_name,
+        service_name: req.body.service_name,
+        description: req.body.description,
+        amount: req.body.amount,
+        payment_method: req.body.payment_method,
+        closing_method: req.body.closing_method,
+      };
+      updateData = { ...receiptFields, ...saleCommercialFields(receiptFields, { partial: true }) };
+    } else {
+      const sellerId = level === 'own' ? req.userId : (req.body.seller_id || existing.seller_id);
+      const displayNameWasSent = Object.prototype.hasOwnProperty.call(req.body, 'seller_display_name');
+      let seller = null;
+      if (sellerId !== existing.seller_id || level !== 'team' || displayNameWasSent) {
+        seller = await assertSellerAllowed(req, sellerId);
+      }
+      const seller_display_name = displayNameWasSent
+        ? resolveSalesResponsibleDisplayName(seller, req.body.seller_display_name)
+        : (sellerId !== existing.seller_id ? resolveSalesResponsibleDisplayName(seller) : undefined);
+      const commercial = saleCommercialFields(req.body, { partial: true });
+      updateData = { ...req.body, ...commercial, seller_id: sellerId, seller_display_name };
+    }
+    const sale = await mgmt.updateSale(req.params.id, updateData, req.tenantId);
+    await logActivity({ tenant_id: req.tenantId, user_id: req.userId, action: 'update', entity_type: 'sale', entity_id: req.params.id, description: 'Venda atualizada', metadata: { before: { amount: existing.amount, status: existing.status }, after: updateData } });
     res.json({ success: true, data: sale });
   } catch (err) {
     return mutationError(res, err, 'sales/update');

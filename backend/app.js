@@ -111,7 +111,7 @@ app.use((req, res, next) => {
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 200,                  // 200 requests por IP
+  max: process.env.NODE_ENV === 'test' ? 1000 : 200, // limite normal permanece em 200 por IP
   message: { success: false, message: 'Muitas requisições. Tente mais tarde.' },
   standardHeaders: true,
   legacyHeaders: false,

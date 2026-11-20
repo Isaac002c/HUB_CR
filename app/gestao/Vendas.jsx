@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { getSales, getSalesResponsibles, getInstallmentFollowUps, updateInstallmentSchedule, createSale, updateSale, deleteSale, getManagementTargets, exportSalesWorkbook } from '../lib/managementAPI';
 import { formatBRL, formatDate } from '../lib/processConstants';
 import { FIXED_COMMISSION_PERCENTAGE, FIXED_COMMISSION_THRESHOLD, SUPERVISOR_PERSONAL_PERCENTAGE } from '../lib/commissionPolicy';
+import { calculateLatePaymentCharges } from '../../backend/utils/latePaymentCharges';
 import PeriodFilter from './components/PeriodFilter';
 
 const now = new Date();
@@ -503,15 +504,25 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
     installment_frequency: installment.installment_frequency || 'monthly',
     installment_number: installment.next_installment_number,
   });
+  const initialPaymentDate = localIsoDate();
+  const initialDueDate = String(installment.next_installment_due_date || '').substring(0, 10);
   const [payment, setPayment] = useState({
-    amount: '',
-    closed_at: localIsoDate(),
+    amount: initialDueDate && initialDueDate < initialPaymentDate ? 'auto' : '',
+    closed_at: initialPaymentDate,
     payment_method: installment.payment_method || 'a_vista',
   });
   const set = (key) => (event) => setForm((previous) => ({ ...previous, [key]: event.target.value }));
   const setPaymentField = (key) => (event) => setPayment((previous) => ({ ...previous, [key]: event.target.value }));
-  const amountNow = Number(payment.amount) || 0;
-  const balanceAfterPayment = Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0) - amountNow, 0);
+  const principalBalance = Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0);
+  const lateCharges = calculateLatePaymentCharges({
+    dueDate: form.next_installment_due_date,
+    paymentDate: payment.closed_at,
+    expectedAmount: form.next_installment_amount,
+    priorPayments: Array.isArray(installment.prior_payments) ? installment.prior_payments : [],
+  });
+  const suggestedAmount = Number((principalBalance + lateCharges.total).toFixed(2));
+  const amountNow = payment.amount === 'auto' ? suggestedAmount : Number(payment.amount) || 0;
+  const balanceAfterPayment = Math.max(principalBalance - Math.min(amountNow, principalBalance), 0);
 
   return <div className="modal-overlay" onClick={onClose}>
     <div className="modal-content" style={{ maxWidth: 650 }} onClick={(event) => event.stopPropagation()}>
@@ -526,7 +537,7 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
         if (!form.next_installment_amount || Number(form.next_installment_amount) <= 0) return alert('Informe um valor previsto válido.');
         if (amountNow > 0 && !installment.is_next_installment) return alert('É necessário registrar primeiro o recebimento da parcela anterior.');
         if (amountNow > 0 && !payment.closed_at) return alert('Informe a data em que o pagamento foi recebido.');
-        if (amountNow > Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0)) return alert('O valor recebido não pode superar o saldo desta cobrança.');
+        if (amountNow > principalBalance + lateCharges.total + 0.000001) return alert(`O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${formatBRL(lateCharges.total)}).`);
         if (amountNow > 0 && !payment.payment_method) return alert('Selecione a forma de pagamento.');
         setSubmitting(true);
         const succeeded = await onSubmit({
@@ -560,12 +571,24 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
           </div>
           {installment.is_next_installment ? <>
             <div className="form-row">
-              <Field label="Valor recebido agora (R$)"><input type="number" step="0.01" min="0" value={payment.amount} onChange={setPaymentField('amount')} /></Field>
-              <Field label="Data do recebimento"><input type="date" value={payment.closed_at} onChange={setPaymentField('closed_at')} /></Field>
+              <Field label="Valor recebido agora (R$)">
+                <input type="number" step="0.01" min="0" value={payment.amount === 'auto' ? suggestedAmount : payment.amount} onChange={setPaymentField('amount')} />
+              </Field>
+              <Field label="Data do recebimento">
+                <input type="date" value={payment.closed_at} onChange={(event) => setPayment((previous) => ({
+                  ...previous,
+                  closed_at: event.target.value,
+                  amount: previous.amount === '' && event.target.value > form.next_installment_due_date ? 'auto' : previous.amount,
+                }))} />
+              </Field>
               <Field label="Forma de pagamento"><select value={payment.payment_method} onChange={setPaymentField('payment_method')}>{PAYMENT_METHODS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
             </div>
+            {lateCharges.total > 0 && <div style={paymentConfirmationInfo}>
+              <strong>Encargos por atraso até {formatDate(payment.closed_at)}:</strong> multa de 2%: {formatBRL(lateCharges.fine)} · juros de 1% ao mês, proporcionais a {lateCharges.lateDays} dias: {formatBRL(lateCharges.interest)}.
+              <br /><strong>Total sugerido para quitar:</strong> {formatBRL(suggestedAmount)}. Você pode ajustar o valor; o sistema limita o acréscimo aos encargos calculados.
+            </div>}
             <div style={{ ...muted, marginTop: -5 }}>
-              Saldo após este recebimento: <strong>{formatBRL(balanceAfterPayment)}</strong>{amountNow > 0 && balanceAfterPayment > 0 ? ' · continuará em aberto.' : amountNow > 0 ? ' · será quitada.' : ''}
+              Saldo principal após este recebimento: <strong>{formatBRL(balanceAfterPayment)}</strong>{amountNow > 0 && balanceAfterPayment > 0 ? ' · continuará em aberto.' : amountNow > 0 ? ' · será quitada.' : ''}
             </div>
           </> : <div style={{ ...muted, padding: '8px 0' }}>O recebimento fica disponível depois que a parcela anterior for registrada.</div>}
         </section>

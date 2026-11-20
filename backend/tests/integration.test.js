@@ -158,6 +158,10 @@ async function main() {
   await runSql('gestao_26_installment_frequency.sql');
   await runSql('gestao_27_installment_schedule_amount.sql');
   await runSql('gestao_30_installment_schedule_items.sql');
+  await runSql('gestao_31_user_session_version.sql');
+  await runSql('gestao_32_installment_schedule_dismissals.sql');
+  await runSql('gestao_33_partial_installment_payments.sql');
+  await runSql('gestao_34_installment_late_charges.sql');
   await runSql('gestao_28_cpf_duplicate_guard.sql');
   const supervisionLogin = await one(`SELECT name, email, role, is_active FROM users WHERE id=$1`, [sup.id]);
   const requestedLogins = (await db.query(
@@ -911,7 +915,7 @@ async function main() {
   const expectedFollowingDue = expectedFollowingDueDate.toISOString().substring(0, 10);
   const weeklyPaymentPayload = {
     seller_id: metaSeller.id, customer_name: 'Cliente B', service_name: 'Multa',
-    amount: 1000, closed_at: new Date().toISOString().substring(0, 10),
+    amount: 600, closed_at: new Date().toISOString().substring(0, 10),
     installment_number: 2, installment_total: 3,
     installment_plan_id: crossingSale.json.data.installment_plan_id,
     installment_frequency: 'weekly',
@@ -1184,7 +1188,7 @@ async function main() {
   });
   const confirmSecondCharge = await api('POST', '/api/management/sales', tok(master), {
     seller_id: metaSeller.id, customer_name: 'Cliente parcelas variáveis', service_name: 'Suspensão',
-    amount: 290, closed_at: '2026-10-16', installment_number: 2, installment_total: 3,
+    amount: 300, closed_at: '2026-10-16', installment_number: 2, installment_total: 3,
     installment_plan_id: scheduledSale.json?.data?.installment_plan_id,
     installment_frequency: 'monthly', payment_method: 'pix', closing_method: 'remoto',
   });
@@ -1197,7 +1201,7 @@ async function main() {
     && String(thirdAfterPayment?.next_installment_due_date).substring(0, 10) === adjustedThirdDueDate,
   JSON.stringify({ editThirdCharge: editThirdCharge.json, thirdAfterPayment }));
   check('confirmar uma parcela lança somente o valor realmente recebido e mantém a próxima previsão', confirmSecondCharge.status === 201
-    && Number(confirmSecondCharge.json.data.amount) === 290
+    && Number(confirmSecondCharge.json.data.amount) === 300
     && salesAfterSecondPayment.json.data.filter((sale) => sale.installment_plan_id === scheduledSale.json?.data?.installment_plan_id).length === 2
     && !novemberAfterSecondPayment.json.data.some((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id
       && Number(row.next_installment_number) === 2)
@@ -1205,11 +1209,81 @@ async function main() {
   JSON.stringify({ confirmSecondCharge: confirmSecondCharge.json, salesAfterSecondPayment: salesAfterSecondPayment.json?.data, thirdAfterPayment }));
   const deleteLatestChargeSale = await api('DELETE', `/api/management/sales/${confirmSecondCharge.json?.data?.id}`, tok(master));
   const octoberAfterDelete = await api('GET', `/api/management/sales/installments?month=${firstCompetence.month}&year=${firstCompetence.year}`, tok(master));
-  const reopenedSecondCharge = octoberAfterDelete.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id);
+  const reopenedSecondCharge = Array.isArray(octoberAfterDelete.json?.data)
+    ? octoberAfterDelete.json.data.find((row) => row.installment_plan_id === scheduledSale.json?.data?.installment_plan_id)
+    : null;
   check('excluir o último recebimento reabre a cobrança prevista em vez de deixá-la marcada como paga', deleteLatestChargeSale.status === 200
+    && octoberAfterDelete.status === 200
     && Number(reopenedSecondCharge?.pending_amount) === 300
     && String(reopenedSecondCharge?.next_installment_due_date).substring(0, 10) === agendaFirstDue,
-  JSON.stringify({ deleteLatestChargeSale: deleteLatestChargeSale.json, reopenedSecondCharge }));
+  JSON.stringify({ deleteLatestChargeSale: deleteLatestChargeSale.json, octoberAfterDelete: octoberAfterDelete.json, reopenedSecondCharge }));
+
+  const lateChargePlan = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com encargos de atraso', service_name: 'Multa',
+    amount: 200, closed_at: '2026-10-01', installment_number: 1, installment_total: 2,
+    installment_frequency: 'monthly', payment_method: 'boleto', closing_method: 'remoto',
+    installment_schedule: [{ installment_number: 2, due_date: '2026-11-06', expected_amount: 800 }],
+  });
+  const lateChargePlanId = lateChargePlan.json?.data?.installment_plan_id;
+  const firstPartialLateCharge = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com encargos de atraso', service_name: 'Multa',
+    amount: 500, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: lateChargePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+  });
+  const lateChargeOverLimit = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com encargos de atraso', service_name: 'Multa',
+    amount: 320, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: lateChargePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+  });
+  const partialLateChargeAgenda = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
+  const partialLateChargeRow = partialLateChargeAgenda.json?.data?.find((row) => row.installment_plan_id === lateChargePlanId);
+  check('pagamento parcial mantém o principal em aberto e disponibiliza o histórico usado no cálculo dos encargos',
+    firstPartialLateCharge.status === 201
+      && Number(partialLateChargeRow?.received_amount) === 500
+      && Number(partialLateChargeRow?.pending_amount) === 300
+      && partialLateChargeRow?.prior_payments?.some((receipt) => Number(receipt.principal_amount) === 500),
+  JSON.stringify({ firstPartialLateCharge: firstPartialLateCharge.json, partialLateChargeRow }));
+  check('backend bloqueia recebimento acima do principal mais multa e juros calculados', lateChargeOverLimit.status === 400,
+    JSON.stringify(lateChargeOverLimit.json));
+  const acceptedLateCharge = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com encargos de atraso', service_name: 'Multa',
+    amount: 310, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: lateChargePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+  });
+  const paidLateChargeAgenda = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
+  const paidLateChargeRow = Array.isArray(paidLateChargeAgenda.json?.data)
+    ? paidLateChargeAgenda.json.data.find((row) => row.installment_plan_id === lateChargePlanId)
+    : null;
+  check('recebimento de R$ 310 quita R$ 300 de principal e registra R$ 10 como encargos sem deixar saldo pendente',
+    acceptedLateCharge.status === 201
+      && Number(acceptedLateCharge.json?.data?.amount) === 310
+      && Number(acceptedLateCharge.json?.data?.late_charges_amount) === 10
+      && paidLateChargeAgenda.status === 200
+      && !paidLateChargeRow,
+  JSON.stringify({ acceptedLateCharge: acceptedLateCharge.json, paidLateChargeAgenda: paidLateChargeAgenda.json }));
+  const editedLateCharge = await api('PUT', `/api/management/sales/${acceptedLateCharge.json?.data?.id}`, tok(master), {
+    amount: 315, closed_at: '2026-11-18', payment_method: 'boleto', closing_method: 'remoto',
+  });
+  const agendaAfterLateFeeEdit = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
+  check('editar o recebimento recalcula os encargos e preserva o principal quitado', editedLateCharge.status === 200
+    && Number(editedLateCharge.json?.data?.amount) === 315
+    && Number(editedLateCharge.json?.data?.late_charges_amount) === 15
+    && agendaAfterLateFeeEdit.status === 200
+    && !agendaAfterLateFeeEdit.json?.data?.some((row) => row.installment_plan_id === lateChargePlanId),
+  JSON.stringify({ editedLateCharge: editedLateCharge.json, agendaAfterLateFeeEdit: agendaAfterLateFeeEdit.json }));
+  const deleteFeeReceipt = await api('DELETE', `/api/management/sales/${acceptedLateCharge.json?.data?.id}`, tok(master));
+  const reopenedAgendaAfterFeeDelete = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
+  const reopenedAfterFeeDelete = Array.isArray(reopenedAgendaAfterFeeDelete.json?.data)
+    ? reopenedAgendaAfterFeeDelete.json.data.find((row) => row.installment_plan_id === lateChargePlanId)
+    : null;
+  check('excluir recebimento com encargos reabre somente o principal correspondente', deleteFeeReceipt.status === 200
+    && reopenedAgendaAfterFeeDelete.status === 200
+    && Number(reopenedAfterFeeDelete?.received_amount) === 500
+    && Number(reopenedAfterFeeDelete?.pending_amount) === 300,
+  JSON.stringify({ deleteFeeReceipt: deleteFeeReceipt.json, reopenedAfterFeeDelete }));
 
   // ── FIM ──
   try { await server.stop(); } catch {}

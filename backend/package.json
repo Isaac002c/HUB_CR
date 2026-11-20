@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "node app.js",
-    "test": "node tests/rbac.test.js && node tests/workbook.test.js && node tests/integration.test.js && node tests/email.test.js && node tests/generatedDocuments.test.js",
+    "test": "node tests/latePaymentCharges.test.js && node tests/rbac.test.js && node tests/workbook.test.js && node tests/integration.test.js && node tests/email.test.js && node tests/generatedDocuments.test.js",
     "test:rbac": "node tests/rbac.test.js",
     "test:workbook": "node tests/workbook.test.js",
     "test:integration": "node tests/integration.test.js",

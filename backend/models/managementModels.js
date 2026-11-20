@@ -12,6 +12,7 @@ const {
   SUPERVISOR_TEAM_PERCENTAGE,
   commissionPolicyForRole,
 } = require('../config/commissionPolicy');
+const { calculateLatePaymentCharges } = require('../utils/latePaymentCharges');
 
 function domainError(message, code) {
   const error = new Error(message);
@@ -1015,9 +1016,11 @@ async function getCollaboratorDetail(collaboratorId, tenantId, { months = 12, mo
   };
 }
 
-async function getSellerCommissionPct(sellerId, tenantId, { amount = 0, closedAt = null, excludeSaleId = null } = {}) {
+async function getSellerCommissionPct(sellerId, tenantId, {
+  amount = 0, closedAt = null, excludeSaleId = null, db = pool,
+} = {}) {
   if (!sellerId) return null;
-  const r = await pool.query(
+  const r = await db.query(
     `SELECT u.id, u.name, LOWER(u.role) AS role, u.team_id, t.supervisor_id,
             u.commission_percentage, u.commission_threshold
        FROM users u
@@ -1035,8 +1038,8 @@ async function getSellerCommissionPct(sellerId, tenantId, { amount = 0, closedAt
     commission_mode: policy.mode,
   };
   const date = closedAt || new Date().toISOString().substring(0, 10);
-  const accumulated = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total
+  const accumulated = await db.query(
+    `SELECT COALESCE(SUM(amount - COALESCE(late_charges_amount, 0)), 0) AS total
        FROM sales
       WHERE tenant_id = $1 AND seller_id = $2
         AND LOWER(COALESCE(status, 'confirmed')) NOT IN ('canceled','cancelled','refunded','reversed','invalid')
@@ -1077,12 +1080,16 @@ async function getSales(tenantId, { start, end, teamId, sellerId, limit = 100, o
             t.name AS team_name,
             cl.name AS client_name, co.razao_social AS company_name,
             COALESCE(s.customer_name, cl.name, co.razao_social, co.nome_fantasia) AS customer_display_name,
-            COALESCE(s.service_name, s.description) AS service_display_name
+            COALESCE(s.service_name, s.description) AS service_display_name,
+            payment_schedule.installment_number AS payment_schedule_installment_number,
+            payment_schedule.installment_total AS payment_schedule_installment_total
        FROM sales s
        LEFT JOIN users seller ON seller.id = s.seller_id
        LEFT JOIN teams t      ON t.id = s.team_id AND t.tenant_id = s.tenant_id
        LEFT JOIN clients cl   ON cl.id = s.client_id
        LEFT JOIN companies co ON co.id = s.company_id
+       LEFT JOIN sales_installment_schedule payment_schedule
+         ON payment_schedule.id = s.installment_schedule_id AND payment_schedule.tenant_id = s.tenant_id
       WHERE ${where}
       ORDER BY s.closed_at DESC, s.created_at DESC
       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -1125,14 +1132,33 @@ async function getInstallmentFollowUps(tenantId, {
      ), scheduled AS (
        SELECT open_plans.*,
               item.installment_number AS next_installment_number,
+              item.id AS schedule_id,
               item.installment_number = open_plans.installment_number + 1 AS is_next_installment,
               item.due_date AS projected_due_date,
-              item.expected_amount AS pending_amount
+              item.expected_amount AS expected_amount,
+              item.received_amount AS received_amount,
+              GREATEST(item.expected_amount - item.received_amount, 0) AS pending_amount,
+              receipt_history.prior_payments
          FROM open_plans
          JOIN sales_installment_schedule item
            ON item.tenant_id = open_plans.tenant_id
           AND item.installment_plan_id = open_plans.installment_plan_id
           AND item.status = 'scheduled'
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(
+                    JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                        'paid_at', receipt.closed_at::date,
+                        'principal_amount', GREATEST(receipt.amount - COALESCE(receipt.late_charges_amount, 0), 0)
+                      ) ORDER BY receipt.closed_at, receipt.created_at
+                    ),
+                    '[]'::json
+                  ) AS prior_payments
+             FROM sales receipt
+            WHERE receipt.tenant_id = item.tenant_id
+              AND receipt.installment_schedule_id = item.id
+              AND LOWER(COALESCE(receipt.status, 'confirmed')) NOT IN ('canceled','cancelled','refunded','reversed','invalid')
+         ) receipt_history ON TRUE
      )
      SELECT scheduled.*,
             projected_due_date AS next_installment_due_date,
@@ -1154,6 +1180,40 @@ async function getInstallmentFollowUps(tenantId, {
     params
   );
   return result.rows;
+}
+
+async function cancelInstallmentSchedule(tenantId, planId, installmentNumber) {
+  const result = await pool.query(
+    `UPDATE sales_installment_schedule item
+        SET status = 'cancelled', updated_at = NOW()
+      WHERE item.tenant_id = $1 AND item.installment_plan_id = $2
+        AND item.installment_number = $3 AND item.status = 'scheduled'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM sales_installment_schedule later
+           WHERE later.tenant_id = item.tenant_id
+             AND later.installment_plan_id = item.installment_plan_id
+             AND later.installment_number > item.installment_number
+             AND later.status = 'scheduled'
+        )
+      RETURNING item.id AS schedule_id, item.installment_number`,
+    [tenantId, planId, installmentNumber]
+  );
+  if (result.rows[0]) return result.rows[0];
+
+  const blocked = await pool.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM sales_installment_schedule target
+        WHERE target.tenant_id = $1 AND target.installment_plan_id = $2
+          AND target.installment_number = $3 AND target.status = 'scheduled'
+     ) AND EXISTS (
+       SELECT 1 FROM sales_installment_schedule later
+        WHERE later.tenant_id = $1 AND later.installment_plan_id = $2
+          AND later.installment_number > $3 AND later.status = 'scheduled'
+     ) AS has_later_scheduled`,
+    [tenantId, planId, installmentNumber]
+  );
+  return blocked.rows[0]?.has_later_scheduled ? { blocked: true } : null;
 }
 
 async function resolveInstallmentPlanId(data) {
@@ -1232,6 +1292,16 @@ async function updateInstallmentSchedule(planId, data, tenantId) {
   );
   const previousDueDate = neighbors.rows[0]?.previous_due_date;
   const followingDueDate = neighbors.rows[0]?.following_due_date;
+  const currentSchedule = await pool.query(
+    `SELECT received_amount FROM sales_installment_schedule
+      WHERE tenant_id = $1 AND installment_plan_id = $2 AND installment_number = $3
+        AND status = 'scheduled'`,
+    [tenantId, planId, installmentNumber]
+  );
+  if (!currentSchedule.rowCount) throw domainError('Esta cobrança já foi paga ou não está mais programada.', 'INVALID_INSTALLMENT_PLAN');
+  if (Number(data.next_installment_amount) < Number(currentSchedule.rows[0].received_amount || 0) + 0.01) {
+    throw domainError('O valor previsto não pode ficar abaixo do valor já recebido.', 'INVALID_INSTALLMENT_AMOUNT');
+  }
   const dateOnly = (value) => value instanceof Date ? value.toISOString().substring(0, 10) : String(value || '').substring(0, 10);
   if ((previousDueDate && String(data.next_installment_due_date) <= dateOnly(previousDueDate))
     || (followingDueDate && String(data.next_installment_due_date) >= dateOnly(followingDueDate))) {
@@ -1305,6 +1375,7 @@ async function createSale(data) {
     customer_name = null, service_name = null,
     installment_number = null, installment_total = null,
     installment_plan_id = null, installment_frequency = null,
+    installment_schedule_adjustment = null,
     next_installment_due_date = null, next_installment_amount = null, is_settlement = false,
     payment_method = null, closing_method = null,
     amount = 0, closed_at = null, status = 'confirmed', created_by = null,
@@ -1312,15 +1383,15 @@ async function createSale(data) {
   } = data;
 
   // Snapshot financeiro + organizacional vigente no fechamento.
-  const seller = await getSellerCommissionPct(seller_id, tenant_id, { amount, closedAt: closed_at });
+  let seller = await getSellerCommissionPct(seller_id, tenant_id, { amount, closedAt: closed_at });
   if (!seller) throw domainError('Responsável pela venda não encontrado ou inativo.', 'INVALID_SELLER');
-  const commission_percentage = Number(seller.commission_percentage || 0);
-  const commissionable_amount = Number(seller.commissionable_amount || 0);
-  const commission_trigger_amount = Number(seller.commission_threshold || 0);
+  let commission_percentage = Number(seller.commission_percentage || 0);
+  let commissionable_amount = Number(seller.commissionable_amount || 0);
+  let commission_trigger_amount = Number(seller.commission_threshold || 0);
   const team_id = data.team_id || seller.team_id || null;
   const seller_role_snapshot = seller.role || null;
   const supervisor_id = seller.supervisor_id || null;
-  const commission_amount = computeCommission(commissionable_amount, commission_percentage);
+  let commission_amount = computeCommission(commissionable_amount, commission_percentage);
   const resolvedPlanId = await resolveInstallmentPlanId({ ...data, installment_plan_id });
   const settled = Boolean(is_settlement) || Boolean(installment_total && installment_number >= installment_total);
   let resolvedFrequency = installment_total ? (installment_frequency || 'monthly') : null;
@@ -1364,6 +1435,7 @@ async function createSale(data) {
   try {
     await client.query('BEGIN');
     let scheduledPayment = null;
+    let latestScheduledSale = null;
     if (installment_total && Number(installment_number) > 1) {
       const latestResult = await client.query(
         `SELECT * FROM sales
@@ -1374,6 +1446,7 @@ async function createSale(data) {
       );
       const latest = latestResult.rows[0];
       if (!latest) throw domainError('Parcelamento não encontrado para esse responsável.', 'INVALID_INSTALLMENT_PLAN');
+      latestScheduledSale = latest;
       if (Number(installment_number) !== Number(latest.installment_number) + 1) {
         throw domainError('Essa parcela já foi recebida ou existe uma parcela anterior pendente.', 'INVALID_INSTALLMENT_SEQUENCE');
       }
@@ -1391,6 +1464,60 @@ async function createSale(data) {
       scheduledPayment = scheduledResult.rows[0];
       if (!scheduledPayment) {
         throw domainError('A parcela não está mais programada. Atualize a tela e tente novamente.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      if (installment_schedule_adjustment) {
+        const adjustedDueDate = String(installment_schedule_adjustment.next_installment_due_date || '').substring(0, 10);
+        const adjustedExpectedAmount = Number(installment_schedule_adjustment.next_installment_amount);
+        const parsedAdjustedDate = /^\d{4}-\d{2}-\d{2}$/.test(adjustedDueDate)
+          ? new Date(`${adjustedDueDate}T12:00:00Z`)
+          : null;
+        if (!parsedAdjustedDate || Number.isNaN(parsedAdjustedDate.getTime())
+          || parsedAdjustedDate.toISOString().substring(0, 10) !== adjustedDueDate
+          || !Number.isFinite(adjustedExpectedAmount) || adjustedExpectedAmount <= 0) {
+          throw domainError('Revise o vencimento e o valor previsto da cobrança.', 'VALIDATION');
+        }
+        if (adjustedExpectedAmount < Number(scheduledPayment.received_amount || 0) + 0.01) {
+          throw domainError('O valor previsto não pode ficar abaixo do valor já recebido.', 'INVALID_INSTALLMENT_AMOUNT');
+        }
+        const allScheduledRows = await client.query(
+          `SELECT installment_number, due_date
+             FROM sales_installment_schedule
+            WHERE tenant_id = $1 AND installment_plan_id = $2 AND status <> 'cancelled'
+            ORDER BY installment_number
+            FOR UPDATE`,
+          [tenant_id, resolvedPlanId]
+        );
+        const dateOnly = (value) => value instanceof Date ? value.toISOString().substring(0, 10) : String(value || '').substring(0, 10);
+        const installmentNo = Number(installment_number);
+        const previousDueDate = allScheduledRows.rows
+          .filter((row) => Number(row.installment_number) < installmentNo)
+          .map((row) => dateOnly(row.due_date)).sort().at(-1);
+        const followingDueDate = allScheduledRows.rows
+          .filter((row) => Number(row.installment_number) > installmentNo)
+          .map((row) => dateOnly(row.due_date)).sort()[0];
+        if ((previousDueDate && adjustedDueDate <= previousDueDate)
+          || (followingDueDate && adjustedDueDate >= followingDueDate)) {
+          throw domainError('O vencimento deve ficar entre as demais parcelas do plano.', 'INVALID_INSTALLMENT_DUE_DATE');
+        }
+        const updateAdjusted = await client.query(
+          `UPDATE sales_installment_schedule
+              SET due_date = $1, expected_amount = $2, updated_at = NOW()
+            WHERE id = $3 AND tenant_id = $4 AND status = 'scheduled'
+            RETURNING id`,
+          [adjustedDueDate, adjustedExpectedAmount, scheduledPayment.id, tenant_id]
+        );
+        if (!updateAdjusted.rowCount) {
+          throw domainError('Esta cobrança já foi paga ou não está mais programada.', 'INVALID_INSTALLMENT_PLAN');
+        }
+        scheduledPayment.due_date = adjustedDueDate;
+        scheduledPayment.expected_amount = adjustedExpectedAmount;
+        if (installmentNo === Number(latestScheduledSale.installment_number) + 1) {
+          await client.query(
+            `UPDATE sales SET next_installment_due_date = $1, next_installment_amount = $2, updated_at = NOW()
+              WHERE id = $3 AND tenant_id = $4`,
+            [adjustedDueDate, adjustedExpectedAmount, latestScheduledSale.id, tenant_id]
+          );
+        }
       }
       if (!settled) {
         const following = await client.query(
@@ -1424,25 +1551,91 @@ async function createSale(data) {
       }
     }
 
+    const receivedBefore = scheduledPayment ? Number(scheduledPayment.received_amount || 0) : 0;
+    const scheduledBalance = scheduledPayment
+      ? Number((Number(scheduledPayment.expected_amount) - receivedBefore).toFixed(2))
+      : null;
+    if (scheduledPayment && (!Number.isFinite(scheduledBalance) || scheduledBalance <= 0)) {
+      throw domainError('Esta cobrança não possui saldo em aberto. Atualize a tela e tente novamente.', 'INVALID_INSTALLMENT_SEQUENCE');
+    }
+    let principalReceivedNow = Number(amount);
+    let lateChargesAmount = 0;
+    if (scheduledPayment) {
+      const priorReceipts = await client.query(
+        `SELECT closed_at::date AS paid_at,
+                GREATEST(amount - COALESCE(late_charges_amount, 0), 0) AS principal_amount
+           FROM sales
+          WHERE tenant_id = $1 AND installment_schedule_id = $2
+            AND LOWER(COALESCE(status, 'confirmed')) NOT IN ('canceled','cancelled','refunded','reversed','invalid')
+          ORDER BY closed_at, created_at`,
+        [tenant_id, scheduledPayment.id]
+      );
+      const paymentDate = String(closed_at || new Date().toISOString()).substring(0, 10);
+      const lateCharges = calculateLatePaymentCharges({
+        dueDate: scheduledPayment.due_date,
+        paymentDate,
+        expectedAmount: scheduledPayment.expected_amount,
+        priorPayments: priorReceipts.rows,
+      });
+      if (Number(amount) > scheduledBalance + lateCharges.total + 0.000001) {
+        throw domainError(
+          lateCharges.total > 0
+            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${lateCharges.total.toFixed(2)}).`
+            : 'O valor recebido não pode superar o saldo desta cobrança.',
+          'INVALID_INSTALLMENT_AMOUNT'
+        );
+      }
+      principalReceivedNow = Math.min(Number(amount), scheduledBalance);
+      lateChargesAmount = Number((Number(amount) - principalReceivedNow).toFixed(2));
+      if (lateChargesAmount > lateCharges.total + 0.000001) {
+        throw domainError('Os encargos por atraso excedem o limite previsto no contrato.', 'INVALID_INSTALLMENT_AMOUNT');
+      }
+      if (lateChargesAmount > 0) {
+        seller = await getSellerCommissionPct(seller_id, tenant_id, {
+          amount: principalReceivedNow,
+          closedAt: closed_at,
+          db: client,
+        });
+        if (!seller) throw domainError('Responsável pela venda não encontrado ou inativo.', 'INVALID_SELLER');
+        commission_percentage = Number(seller.commission_percentage || 0);
+        commissionable_amount = Number(seller.commissionable_amount || 0);
+        commission_trigger_amount = Number(seller.commission_threshold || 0);
+        commission_amount = computeCommission(commissionable_amount, commission_percentage);
+      }
+    }
+    const isPartialScheduledPayment = Boolean(scheduledPayment && principalReceivedNow < scheduledBalance - 0.000001);
+    const saleSettled = !isPartialScheduledPayment && settled;
+    if (isPartialScheduledPayment) {
+      resolvedNextDueDate = null;
+      resolvedNextAmount = null;
+    }
+    const saleInstallmentNumber = isPartialScheduledPayment ? null : installment_number;
+    const saleInstallmentTotal = isPartialScheduledPayment ? null : installment_total;
+    const saleInstallmentPlanId = isPartialScheduledPayment ? null : resolvedPlanId;
+    const saleInstallmentFrequency = isPartialScheduledPayment ? null : resolvedFrequency;
+    const saleScheduleId = scheduledPayment?.id || null;
+
     const saleResult = await client.query(
       `INSERT INTO sales
          (tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name_snapshot, supervisor_id,
           client_id, company_id, lead_id, fine_id,
           description, customer_name, service_name, installment_number, installment_total,
            installment_plan_id, installment_frequency, next_installment_due_date, next_installment_amount, is_settlement,
+           installment_schedule_id,
            payment_method, closing_method, amount, commission_percentage,
            commissionable_amount, commission_trigger_amount, commission_amount, status,
-           closed_at, source, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-               COALESCE($29, CURRENT_DATE), 'manual', $30)
+           closed_at, source, created_by, late_charges_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
+               COALESCE($30, CURRENT_DATE), 'manual', $31, $32)
        RETURNING *`,
       [tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name || seller.name, supervisor_id,
        client_id, company_id, lead_id, fine_id,
-       description, customer_name, service_name, installment_number, installment_total,
-       resolvedPlanId, resolvedFrequency, resolvedNextDueDate, resolvedNextAmount, settled,
+       description, customer_name, service_name, saleInstallmentNumber, saleInstallmentTotal,
+       saleInstallmentPlanId, saleInstallmentFrequency, resolvedNextDueDate, resolvedNextAmount, saleSettled,
+       saleScheduleId,
        payment_method, closing_method, amount, commission_percentage,
        commissionable_amount, commission_trigger_amount, commission_amount, status,
-       closed_at, created_by]
+       closed_at, created_by, lateChargesAmount]
     );
     const sale = saleResult.rows[0];
 
@@ -1457,12 +1650,22 @@ async function createSale(data) {
       }
     }
     if (scheduledPayment) {
-      await client.query(
-        `UPDATE sales_installment_schedule SET status = 'paid', paid_sale_id = $1, updated_at = NOW()
-          WHERE id = $2`,
-        [sale.id, scheduledPayment.id]
-      );
-      if (settled) {
+      const receivedAfter = Number((receivedBefore + principalReceivedNow).toFixed(2));
+      if (isPartialScheduledPayment) {
+        await client.query(
+          `UPDATE sales_installment_schedule SET received_amount = $1, updated_at = NOW()
+            WHERE id = $2 AND status = 'scheduled'`,
+          [receivedAfter, scheduledPayment.id]
+        );
+      } else {
+        await client.query(
+          `UPDATE sales_installment_schedule
+              SET received_amount = $1, status = 'paid', paid_sale_id = $2, updated_at = NOW()
+            WHERE id = $3 AND status = 'scheduled'`,
+          [receivedAfter, sale.id, scheduledPayment.id]
+        );
+      }
+      if (saleSettled) {
         await client.query(
           `UPDATE sales_installment_schedule SET status = 'cancelled', updated_at = NOW()
             WHERE tenant_id = $1 AND installment_plan_id = $2 AND installment_number > $3 AND status = 'scheduled'`,
@@ -1483,8 +1686,37 @@ async function createSale(data) {
 // Atualiza venda. NÃO recalcula comissão histórica por mudança futura da regra:
 // o snapshot só muda se valor, consultor ou data da venda forem editados.
 async function updateSale(id, data, tenantId) {
-  const current = await getSaleById(id, tenantId);
-  if (!current) return null;
+  const beforeLock = await getSaleById(id, tenantId);
+  if (!beforeLock) return null;
+  const requestedAmount = data.amount !== undefined ? Number(data.amount) : Number(beforeLock.amount);
+  const requestedSellerId = data.seller_id || beforeLock.seller_id;
+  const requestedClosedAt = data.closed_at || beforeLock.closed_at;
+  const requestedSellerChanged = data.seller_id !== undefined && data.seller_id !== beforeLock.seller_id;
+  const requestedCommissionBasisChanged = requestedAmount !== Number(beforeLock.amount)
+    || requestedSellerChanged
+    || (data.closed_at !== undefined && String(data.closed_at).substring(0, 10) !== String(beforeLock.closed_at).substring(0, 10));
+  let requestedSellerSnapshot = requestedCommissionBasisChanged
+    ? await getSellerCommissionPct(requestedSellerId, tenantId, { amount: requestedAmount, closedAt: requestedClosedAt, excludeSaleId: id })
+    : null;
+  if (requestedCommissionBasisChanged && !requestedSellerSnapshot) {
+    throw domainError('Responsável pela venda não encontrado ou inativo.', 'INVALID_SELLER');
+  }
+  const client = await pool.connect();
+  try {
+  await client.query('BEGIN');
+  const currentResult = await client.query(
+    `SELECT * FROM sales WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [id, tenantId]
+  );
+  const current = currentResult.rows[0];
+  if (!current) {
+    await client.query('ROLLBACK');
+    return null;
+  }
+  if (Number(beforeLock.amount) !== Number(current.amount)
+    || beforeLock.seller_id !== current.seller_id
+    || String(beforeLock.closed_at).substring(0, 10) !== String(current.closed_at).substring(0, 10)) {
+    throw domainError('A venda foi alterada em outra sessão. Atualize a página e tente novamente.', 'SALE_CONCURRENT_UPDATE');
+  }
 
   const amount = data.amount !== undefined ? Number(data.amount) : Number(current.amount);
   const sellerId = data.seller_id || current.seller_id;
@@ -1494,46 +1726,184 @@ async function updateSale(id, data, tenantId) {
     (data.amount !== undefined && Number(data.amount) !== Number(current.amount))
     || sellerChanged
     || (data.closed_at !== undefined && String(data.closed_at).substring(0, 10) !== String(current.closed_at).substring(0, 10));
-  const seller = changesCommissionBasis
-    ? await getSellerCommissionPct(sellerId, tenantId, { amount, closedAt, excludeSaleId: id })
-    : null;
+  let seller = changesCommissionBasis ? requestedSellerSnapshot : null;
   if (changesCommissionBasis && !seller) throw domainError('Responsável pela venda não encontrado ou inativo.', 'INVALID_SELLER');
-  const commission_percentage = seller
+  let commission_percentage = seller
     ? Number(seller.commission_percentage || 0)
     : Number(current.commission_percentage);
-  const commissionable_amount = seller
+  let commissionable_amount = seller
     ? Number(seller.commissionable_amount || 0)
     : Number(current.commissionable_amount || 0);
-  const commission_trigger_amount = seller
+  let commission_trigger_amount = seller
     ? Number(seller.commission_threshold || 0)
     : Number(current.commission_trigger_amount || 0);
-  const commission_amount = computeCommission(commissionable_amount, commission_percentage);
+  let commission_amount = computeCommission(commissionable_amount, commission_percentage);
   const snapshotTeamId = sellerChanged ? (seller?.team_id || null) : current.team_id;
   const snapshotRole = sellerChanged ? (seller?.role || null) : (current.seller_role_snapshot || seller?.role || null);
   const snapshotSupervisorId = sellerChanged
     ? (seller?.supervisor_id || null)
     : (current.supervisor_id || seller?.supervisor_id || null);
-  const installmentChanged = Object.prototype.hasOwnProperty.call(data, 'installment_number')
+  let installmentChanged = Object.prototype.hasOwnProperty.call(data, 'installment_number')
     || Object.prototype.hasOwnProperty.call(data, 'installment_total')
     || Object.prototype.hasOwnProperty.call(data, 'installment_plan_id')
     || Object.prototype.hasOwnProperty.call(data, 'installment_frequency')
     || Object.prototype.hasOwnProperty.call(data, 'next_installment_due_date')
     || Object.prototype.hasOwnProperty.call(data, 'is_settlement');
-  const nextInstallmentNumber = installmentChanged ? data.installment_number : current.installment_number;
-  const nextInstallmentTotal = installmentChanged ? data.installment_total : current.installment_total;
-  const resolvedPlanId = nextInstallmentTotal
+  let nextInstallmentNumber = installmentChanged ? data.installment_number : current.installment_number;
+  let nextInstallmentTotal = installmentChanged ? data.installment_total : current.installment_total;
+  let resolvedPlanId = nextInstallmentTotal
     ? (data.installment_plan_id || current.installment_plan_id || randomUUID())
     : null;
-  const resolvedFrequency = nextInstallmentTotal
+  let resolvedFrequency = nextInstallmentTotal
     ? (data.installment_frequency || current.installment_frequency || 'monthly')
     : null;
-  const settled = installmentChanged
+  let settled = installmentChanged
     ? (Boolean(data.is_settlement) || Boolean(
       nextInstallmentTotal && Number(nextInstallmentNumber) >= Number(nextInstallmentTotal)
     ))
     : Boolean(current.is_settlement);
 
-  const r = await pool.query(
+  let linkedSchedule = null;
+  let adjustedReceivedAmount = null;
+  let linkedScheduleStatusAfterEdit = null;
+  let linkedSchedulePaidSaleAfterEdit = null;
+  let linkedNextDueDateAfterEdit;
+  let lateChargesAmount = Number(current.late_charges_amount || 0);
+  if (current.installment_schedule_id) {
+    const scheduleResult = await client.query(
+      `SELECT * FROM sales_installment_schedule
+        WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+      [current.installment_schedule_id, tenantId]
+    );
+    linkedSchedule = scheduleResult.rows[0] || null;
+    const installmentMetadataChanged =
+      (nextInstallmentNumber ?? null) !== (current.installment_number ?? null)
+      || (nextInstallmentTotal ?? null) !== (current.installment_total ?? null)
+      || (resolvedPlanId ?? null) !== (current.installment_plan_id ?? null)
+      || (resolvedFrequency ?? null) !== (current.installment_frequency ?? null)
+      || settled !== Boolean(current.is_settlement);
+    const statusChanged = data.status !== undefined && data.status !== current.status;
+    if (!linkedSchedule) throw domainError('A cobrança vinculada a esta venda não foi encontrada.', 'INVALID_INSTALLMENT_PLAN');
+    if (sellerChanged || installmentMetadataChanged || statusChanged) {
+      throw domainError('Este recebimento pertence a uma cobrança programada. Responsável, parcela e status não podem ser alterados por esta tela.', 'INVALID_INSTALLMENT_PAYMENT_EDIT');
+    }
+    const paymentDateChanged = data.closed_at !== undefined
+      && String(data.closed_at).substring(0, 10) !== String(current.closed_at).substring(0, 10);
+    if (amount !== Number(current.amount) || paymentDateChanged) {
+      const paidByThisSale = linkedSchedule.status === 'paid' && linkedSchedule.paid_sale_id === current.id;
+      const openPartialReceipt = linkedSchedule.status === 'scheduled' && !current.installment_plan_id;
+      if (!paidByThisSale && !openPartialReceipt) {
+        throw domainError('Edite o recebimento que quitou a cobrança ou ajuste a parcela em aberto pela agenda.', 'INVALID_INSTALLMENT_PAYMENT_EDIT');
+      }
+      if (current.installment_plan_id && current.installment_number) {
+        const laterInstallment = await client.query(
+          `SELECT 1 FROM sales
+            WHERE tenant_id = $1 AND installment_plan_id = $2
+              AND installment_number > $3
+            LIMIT 1`,
+          [tenantId, current.installment_plan_id, current.installment_number]
+        );
+        if (laterInstallment.rowCount) {
+          throw domainError('Edite as parcelas na ordem inversa, começando pela mais recente.', 'INVALID_INSTALLMENT_SEQUENCE');
+        }
+      }
+      const expectedAmount = Number(linkedSchedule.expected_amount);
+      const currentPrincipal = Math.max(Number(current.amount) - Number(current.late_charges_amount || 0), 0);
+      const receivedByOtherPayments = Math.max(Number(linkedSchedule.received_amount || 0) - currentPrincipal, 0);
+      const principalBalance = Math.max(Number((expectedAmount - receivedByOtherPayments).toFixed(2)), 0);
+      const priorReceipts = await client.query(
+        `SELECT closed_at::date AS paid_at,
+                GREATEST(amount - COALESCE(late_charges_amount, 0), 0) AS principal_amount
+           FROM sales
+          WHERE tenant_id = $1 AND installment_schedule_id = $2 AND id <> $3
+            AND LOWER(COALESCE(status, 'confirmed')) NOT IN ('canceled','cancelled','refunded','reversed','invalid')
+          ORDER BY closed_at, created_at`,
+        [tenantId, linkedSchedule.id, current.id]
+      );
+      const paymentDate = String(closedAt || new Date().toISOString()).substring(0, 10);
+      const lateCharges = calculateLatePaymentCharges({
+        dueDate: linkedSchedule.due_date,
+        paymentDate,
+        expectedAmount,
+        priorPayments: priorReceipts.rows,
+      });
+      if (!Number.isFinite(amount) || amount <= 0
+        || amount > principalBalance + lateCharges.total + 0.000001) {
+        throw domainError(
+          lateCharges.total > 0
+            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${lateCharges.total.toFixed(2)}).`
+            : 'O valor recebido não pode superar o saldo desta cobrança.',
+          'INVALID_INSTALLMENT_AMOUNT'
+        );
+      }
+      const principalReceived = Math.min(amount, principalBalance);
+      lateChargesAmount = Number((amount - principalReceived).toFixed(2));
+      adjustedReceivedAmount = Number((receivedByOtherPayments + principalReceived).toFixed(2));
+      if (lateChargesAmount > lateCharges.total + 0.000001) {
+        throw domainError('Os encargos por atraso excedem o limite previsto no contrato.', 'INVALID_INSTALLMENT_AMOUNT');
+      }
+      const nowFullyReceived = Math.abs(adjustedReceivedAmount - expectedAmount) <= 0.000001;
+      linkedScheduleStatusAfterEdit = nowFullyReceived ? 'paid' : 'scheduled';
+      linkedSchedulePaidSaleAfterEdit = nowFullyReceived ? current.id : null;
+
+      if (changesCommissionBasis) {
+        seller = await getSellerCommissionPct(sellerId, tenantId, {
+          amount: principalReceived,
+          closedAt,
+          excludeSaleId: id,
+          db: client,
+        });
+        if (!seller) throw domainError('Responsável pela venda não encontrado ou inativo.', 'INVALID_SELLER');
+        commission_percentage = Number(seller.commission_percentage || 0);
+        commissionable_amount = Number(seller.commissionable_amount || 0);
+        commission_trigger_amount = Number(seller.commission_threshold || 0);
+        commission_amount = computeCommission(commissionable_amount, commission_percentage);
+      }
+
+      if (!nowFullyReceived && current.installment_plan_id) {
+        // Lowering a fully paid receipt reopens its scheduled balance. Remove
+        // installment identity from this sale so the next installment remains
+        // the next item in the plan, instead of looking already paid.
+        installmentChanged = true;
+        nextInstallmentNumber = null;
+        nextInstallmentTotal = null;
+        resolvedPlanId = null;
+        resolvedFrequency = null;
+        settled = false;
+        linkedNextDueDateAfterEdit = null;
+      } else if (nowFullyReceived && !current.installment_plan_id) {
+        // A partial receipt can be edited up to the remaining balance. Restore
+        // the installment identity when that edit completes the scheduled item.
+        const sourcePlan = await client.query(
+          `SELECT installment_frequency FROM sales
+            WHERE tenant_id = $1 AND installment_plan_id = $2 AND seller_id = $3
+              AND installment_number IS NOT NULL
+            ORDER BY installment_number DESC, closed_at DESC, created_at DESC
+            LIMIT 1`,
+          [tenantId, linkedSchedule.installment_plan_id, current.seller_id]
+        );
+        installmentChanged = true;
+        nextInstallmentNumber = Number(linkedSchedule.installment_number);
+        nextInstallmentTotal = Number(linkedSchedule.installment_total);
+        resolvedPlanId = linkedSchedule.installment_plan_id;
+        resolvedFrequency = sourcePlan.rows[0]?.installment_frequency || 'monthly';
+        settled = nextInstallmentNumber >= nextInstallmentTotal;
+        linkedNextDueDateAfterEdit = null;
+        if (!settled) {
+          const following = await client.query(
+            `SELECT due_date FROM sales_installment_schedule
+              WHERE tenant_id = $1 AND installment_plan_id = $2
+                AND installment_number = $3 AND status = 'scheduled'
+              LIMIT 1`,
+            [tenantId, linkedSchedule.installment_plan_id, nextInstallmentNumber + 1]
+          );
+          linkedNextDueDateAfterEdit = following.rows[0]?.due_date || null;
+        }
+      }
+    }
+  }
+
+  const r = await client.query(
     `UPDATE sales SET
         seller_id  = COALESCE($1, seller_id),
         team_id    = $2,
@@ -1562,6 +1932,7 @@ async function updateSale(id, data, tenantId) {
         commission_amount = $26,
         status = COALESCE($27, status),
         closed_at = COALESCE($28, closed_at),
+        late_charges_amount = $31,
         updated_at = NOW()
       WHERE id = $29 AND tenant_id = $30 RETURNING *`,
     [
@@ -1570,15 +1941,42 @@ async function updateSale(id, data, tenantId) {
       data.client_id ?? null, data.company_id ?? null,
       data.lead_id ?? null, data.fine_id ?? null,
       data.description ?? null, data.customer_name ?? null, data.service_name ?? null,
-      installmentChanged, data.installment_number ?? null, data.installment_total ?? null,
+      installmentChanged, nextInstallmentNumber ?? null, nextInstallmentTotal ?? null,
       resolvedPlanId, resolvedFrequency,
-      settled ? null : (data.next_installment_due_date ?? current.next_installment_due_date ?? null), settled,
+      linkedNextDueDateAfterEdit !== undefined
+        ? linkedNextDueDateAfterEdit
+        : (settled ? null : (data.next_installment_due_date ?? current.next_installment_due_date ?? null)), settled,
       data.payment_method ?? null, data.closing_method ?? null,
       amount, commission_percentage, commissionable_amount, commission_trigger_amount,
-      commission_amount, data.status ?? null, data.closed_at ?? null, id, tenantId,
+      commission_amount, data.status ?? null, data.closed_at ?? null, id, tenantId, lateChargesAmount,
     ]
   );
+  if (adjustedReceivedAmount !== null) {
+    await client.query(
+      `UPDATE sales_installment_schedule
+          SET received_amount = $1, status = $2, paid_sale_id = $3, updated_at = NOW()
+        WHERE id = $4 AND tenant_id = $5`,
+      [adjustedReceivedAmount, linkedScheduleStatusAfterEdit, linkedSchedulePaidSaleAfterEdit, linkedSchedule.id, tenantId]
+    );
+    if (linkedScheduleStatusAfterEdit === 'scheduled' && current.is_settlement
+      && Number(linkedSchedule.installment_number) < Number(linkedSchedule.installment_total)) {
+      await client.query(
+        `UPDATE sales_installment_schedule
+            SET status = 'scheduled', updated_at = NOW()
+          WHERE tenant_id = $1 AND installment_plan_id = $2
+            AND installment_number > $3 AND status = 'cancelled'`,
+        [tenantId, linkedSchedule.installment_plan_id, linkedSchedule.installment_number]
+      );
+    }
+  }
+  await client.query('COMMIT');
   return r.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function deleteSale(id, tenantId) {
@@ -1593,11 +1991,39 @@ async function deleteSale(id, tenantId) {
       await client.query('ROLLBACK');
       return null;
     }
+    if (current.installment_schedule_id) {
+      const scheduleResult = await client.query(
+        `SELECT * FROM sales_installment_schedule
+          WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        [current.installment_schedule_id, tenantId]
+      );
+      const linkedSchedule = scheduleResult.rows[0];
+      if (linkedSchedule) {
+        if (linkedSchedule.status === 'paid' && linkedSchedule.paid_sale_id !== current.id) {
+          throw domainError('Exclua primeiro o recebimento que quitou a cobrança e depois este recebimento parcial.', 'INVALID_INSTALLMENT_PAYMENT_ORDER');
+        }
+        const currentPrincipal = Math.max(Number(current.amount) - Number(current.late_charges_amount || 0), 0);
+        const remainingAfterDelete = Number((Number(linkedSchedule.received_amount || 0) - currentPrincipal).toFixed(2));
+        await client.query(
+          `UPDATE sales_installment_schedule
+              SET received_amount = GREATEST($1, 0),
+                  status = CASE WHEN paid_sale_id = $2 THEN 'scheduled' ELSE status END,
+                  paid_sale_id = CASE WHEN paid_sale_id = $2 THEN NULL ELSE paid_sale_id END,
+                  updated_at = NOW()
+            WHERE id = $3`,
+          [remainingAfterDelete, current.id, linkedSchedule.id]
+        );
+      }
+    }
     if (current.installment_plan_id && current.installment_number) {
       const later = await client.query(
         `SELECT 1 FROM sales
           WHERE tenant_id = $1 AND installment_plan_id = $2
             AND installment_number > $3
+          UNION ALL
+         SELECT 1 FROM sales_installment_schedule
+          WHERE tenant_id = $1 AND installment_plan_id = $2
+            AND installment_number > $3 AND received_amount > 0
           LIMIT 1`,
         [tenantId, current.installment_plan_id, current.installment_number]
       );
@@ -1656,6 +2082,7 @@ module.exports = {
   getOfficeExpenses, createOfficeExpense, updateOfficeExpense, deleteOfficeExpense,
   getCommissionTiers, createCommissionTier, updateCommissionTier, deleteCommissionTier,
   getSales, getInstallmentFollowUps, getSaleById, getLatestInstallmentPlan,
+  cancelInstallmentSchedule,
   createSale, updateSale, updateInstallmentSchedule, deleteSale,
   computeCommission, computeCommissionableAmount,
 };
