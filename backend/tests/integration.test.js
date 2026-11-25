@@ -162,6 +162,7 @@ async function main() {
   await runSql('gestao_32_installment_schedule_dismissals.sql');
   await runSql('gestao_33_partial_installment_payments.sql');
   await runSql('gestao_34_installment_late_charges.sql');
+  await runSql('gestao_35_late_charge_master_override.sql');
   await runSql('gestao_28_cpf_duplicate_guard.sql');
   const supervisionLogin = await one(`SELECT name, email, role, is_active FROM users WHERE id=$1`, [sup.id]);
   const requestedLogins = (await db.query(
@@ -1123,6 +1124,44 @@ async function main() {
     && newTeamSnapshot.json.data.length === 1,
   JSON.stringify({ old: oldTeamSnapshot.json, next: newTeamSnapshot.json }));
 
+  const reassignedClient = await api('POST', '/api/clients', tok(s1), {
+    name: 'Cliente com cobrança transferida', status: 'fechado',
+  });
+  const reassignedDue = new Date();
+  reassignedDue.setUTCDate(reassignedDue.getUTCDate() + 30);
+  const reassignedDueDate = reassignedDue.toISOString().substring(0, 10);
+  const reassignedCompetence = { month: Number(reassignedDueDate.slice(5, 7)), year: Number(reassignedDueDate.slice(0, 4)) };
+  const reassignedPlan = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: s1.id, client_id: reassignedClient.json?.data?.id,
+    customer_name: 'Cliente com cobrança transferida', service_name: 'Multa',
+    amount: 100, closed_at: '2026-10-01', installment_number: 1, installment_total: 2,
+    installment_frequency: 'monthly', payment_method: 'boleto', closing_method: 'remoto',
+    installment_schedule: [{ installment_number: 2, due_date: reassignedDueDate, expected_amount: 300 }],
+  });
+  const reassignedClientUpdate = await api('PUT', `/api/clients/${reassignedClient.json?.data?.id}`, tok(master), {
+    ...(reassignedClient.json?.data || {}), consultant_id: s2.id,
+  });
+  const oldResponsibleFollowUps = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s1.id}`, tok(master));
+  const newResponsibleFollowUps = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s2.id}`, tok(master));
+  const transferredOpenCharge = newResponsibleFollowUps.json?.data?.find((row) => row.installment_plan_id === reassignedPlan.json?.data?.installment_plan_id);
+  check('trocar o consultor do cliente atualiza responsável e filtro da cobrança em aberto',
+    reassignedClient.status === 201 && reassignedClientUpdate.status === 200 && reassignedPlan.status === 201
+      && !oldResponsibleFollowUps.json?.data?.some((row) => row.installment_plan_id === reassignedPlan.json?.data?.installment_plan_id)
+      && transferredOpenCharge?.responsible_seller_id === s2.id
+      && transferredOpenCharge?.seller_name === s2.name,
+    JSON.stringify({ client: reassignedClientUpdate.json, oldRows: oldResponsibleFollowUps.json?.data, charge: transferredOpenCharge }));
+  const transferredChargePaid = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: transferredOpenCharge?.responsible_seller_id,
+    client_id: reassignedClient.json?.data?.id,
+    customer_name: 'Cliente com cobrança transferida', service_name: 'Multa',
+    amount: 300, closed_at: reassignedDueDate, installment_number: 2, installment_total: 2,
+    installment_plan_id: reassignedPlan.json?.data?.installment_plan_id,
+    installment_frequency: 'monthly', payment_method: 'pix', closing_method: 'remoto', is_settlement: true,
+  });
+  check('recebimento futuro da cobrança transferida fica atribuído à nova consultora',
+    transferredChargePaid.status === 201 && transferredChargePaid.json?.data?.seller_id === s2.id,
+    JSON.stringify(transferredChargePaid.json));
+
   console.log('\n== Agenda de valores individuais por parcela ==');
   const missingSchedule = await api('POST', '/api/management/sales', tok(master), {
     seller_id: metaSeller.id, customer_name: 'Cliente agenda incompleta', service_name: 'Multa',
@@ -1237,6 +1276,43 @@ async function main() {
     installment_plan_id: lateChargePlanId, installment_frequency: 'monthly',
     payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
   });
+  const supervisorLateChargeOverride = await api('POST', '/api/management/sales', tok(sup), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com encargos de atraso', service_name: 'Multa',
+    amount: 320, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: lateChargePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+    late_charges_override_amount: 20,
+  });
+  check('supervisão não pode substituir o cálculo automático dos encargos', supervisorLateChargeOverride.status === 403,
+    JSON.stringify(supervisorLateChargeOverride.json));
+  const masterOverridePlan = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com ajuste master', service_name: 'Multa',
+    amount: 200, closed_at: '2026-10-01', installment_number: 1, installment_total: 2,
+    installment_frequency: 'monthly', payment_method: 'boleto', closing_method: 'remoto',
+    installment_schedule: [{ installment_number: 2, due_date: '2026-11-06', expected_amount: 800 }],
+  });
+  const masterOverridePlanId = masterOverridePlan.json?.data?.installment_plan_id;
+  const masterOverridePartial = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com ajuste master', service_name: 'Multa',
+    amount: 500, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: masterOverridePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+  });
+  const masterOverrideReceipt = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: metaSeller.id, customer_name: 'Cliente com ajuste master', service_name: 'Multa',
+    amount: 320, closed_at: '2026-11-18', installment_number: 2, installment_total: 2,
+    installment_plan_id: masterOverridePlanId, installment_frequency: 'monthly',
+    payment_method: 'boleto', closing_method: 'remoto', is_settlement: true,
+    late_charges_override_amount: 20,
+  });
+  check('MASTER pode elevar manualmente os encargos e o valor fica registrado fora do principal',
+    masterOverridePlan.status === 201 && masterOverridePartial.status === 201 && masterOverrideReceipt.status === 201
+      && Number(masterOverrideReceipt.json?.data?.amount) === 320
+      && Number(masterOverrideReceipt.json?.data?.late_charges_amount) === 20
+      && Number(masterOverrideReceipt.json?.data?.late_charges_override_amount) === 20
+      && Number(masterOverrideReceipt.json?.data?.commissionable_amount) === 300
+      && Number(masterOverrideReceipt.json?.data?.commission_amount) === 30,
+    JSON.stringify({ plan: masterOverridePlan.json, partial: masterOverridePartial.json, receipt: masterOverrideReceipt.json }));
   const partialLateChargeAgenda = await api('GET', '/api/management/sales/installments?month=11&year=2026', tok(master));
   const partialLateChargeRow = partialLateChargeAgenda.json?.data?.find((row) => row.installment_plan_id === lateChargePlanId);
   check('pagamento parcial mantém o principal em aberto e disponibiliza o histórico usado no cálculo dos encargos',

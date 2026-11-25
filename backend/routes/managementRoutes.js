@@ -104,7 +104,7 @@ function mutationError(res, err, context) {
   }
   if (err.code === '23505') return res.status(409).json({ success: false, error: 'Já existe um cadastro com esses dados.' });
   if (err.code === '23514') return res.status(400).json({ success: false, error: 'Os dados informados não atendem às regras do cadastro.' });
-  if (['INVALID_TEAM', 'INVALID_SUPERVISOR', 'INVALID_COLLABORATOR', 'INVALID_SELLER', 'INVALID_INSTALLMENT_PLAN', 'INVALID_INSTALLMENT_SEQUENCE', 'INVALID_INSTALLMENT_DUE_DATE', 'INVALID_INSTALLMENT_AMOUNT', 'INVALID_INSTALLMENT_PAYMENT_EDIT', 'INVALID_INSTALLMENT_PAYMENT_ORDER', 'SALE_CONCURRENT_UPDATE'].includes(err.code)) {
+  if (['INVALID_TEAM', 'INVALID_SUPERVISOR', 'INVALID_COLLABORATOR', 'INVALID_SELLER', 'INVALID_INSTALLMENT_PLAN', 'INVALID_INSTALLMENT_SEQUENCE', 'INVALID_INSTALLMENT_DUE_DATE', 'INVALID_INSTALLMENT_AMOUNT', 'INVALID_INSTALLMENT_PAYMENT_EDIT', 'INVALID_INSTALLMENT_PAYMENT_ORDER', 'INSTALLMENT_OWNER_CHANGED', 'SALE_CONCURRENT_UPDATE'].includes(err.code)) {
     return res.status(400).json({ success: false, error: err.message });
   }
   if (err.code === 'FORBIDDEN') return res.status(403).json({ success: false, error: err.message });
@@ -1072,13 +1072,13 @@ router.patch('/sales/installments/:planId', async (req, res) => {
     const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId);
     if (!existing) return res.status(404).json({ success: false, error: 'Cobrança não encontrada.' });
     const level = access.accessLevel(req.userRole, 'gestao');
-    if (level === 'own' && existing.seller_id !== req.userId) {
+    if (level === 'own' && existing.assigned_seller_id !== req.userId) {
       return res.status(403).json({ success: false, error: 'Acesso negado a esta cobrança.' });
     }
     if (level === 'team') {
-      const visibleRole = String(existing.seller_role_snapshot || '').toLowerCase();
-      const visibleSchedule = existing.team_id === req.teamId
-        && (visibleRole === 'seller' || existing.seller_id === req.userId);
+      const visibleRole = String(existing.assigned_seller_role || '').toLowerCase();
+      const visibleSchedule = existing.assigned_team_id === req.teamId
+        && (visibleRole === 'seller' || existing.assigned_seller_id === req.userId);
       if (!visibleSchedule) return res.status(403).json({ success: false, error: 'Cobrança fora da sua equipe.' });
     }
     const schedule = installmentScheduleFields(req.body);
@@ -1190,6 +1190,18 @@ router.post('/sales', async (req, res) => {
     const seller = await assertSellerAllowed(req, seller_id);
     const seller_display_name = resolveSalesResponsibleDisplayName(seller, req.body.seller_display_name);
 
+    const lateChargesOverrideWasSent = Object.prototype.hasOwnProperty.call(req.body, 'late_charges_override_amount');
+    if (lateChargesOverrideWasSent && String(req.userRole || '').toLowerCase() !== 'master') {
+      return res.status(403).json({ success: false, error: 'Somente o MASTER pode ajustar manualmente os encargos por atraso.' });
+    }
+    if (lateChargesOverrideWasSent
+      && (!req.body.installment_plan_id || Number(req.body.installment_number) < 2)) {
+      return res.status(400).json({ success: false, error: 'O ajuste manual de encargos só pode ser usado em parcela programada.' });
+    }
+    const late_charges_override_amount = lateChargesOverrideWasSent
+      ? nonNegative(req.body.late_charges_override_amount, 'Encargos por atraso')
+      : null;
+
     if (!req.body.amount || Number(req.body.amount) <= 0) {
       return res.status(400).json({ success: false, error: 'Valor da venda é obrigatório e deve ser maior que zero.' });
     }
@@ -1209,6 +1221,7 @@ router.post('/sales', async (req, res) => {
       status: req.body.status || 'confirmed',
       created_by: req.userId,
       seller_display_name,
+      late_charges_override_amount,
     });
     await logActivity({ tenant_id: req.tenantId, user_id: req.userId, action: 'create', entity_type: 'sale', entity_id: sale.id, description: `Venda registrada (R$ ${sale.amount})` });
     res.status(201).json({ success: true, data: sale });
@@ -1256,6 +1269,14 @@ router.put('/sales/:id', async (req, res) => {
         payment_method: req.body.payment_method,
         closing_method: req.body.closing_method,
       };
+      if (Object.prototype.hasOwnProperty.call(req.body, 'late_charges_override_amount')) {
+        if (String(req.userRole || '').toLowerCase() !== 'master') {
+          return res.status(403).json({ success: false, error: 'Somente o MASTER pode ajustar manualmente os encargos por atraso.' });
+        }
+        receiptFields.late_charges_override_amount = req.body.late_charges_override_amount === null
+          ? null
+          : nonNegative(req.body.late_charges_override_amount, 'Encargos por atraso');
+      }
       updateData = { ...receiptFields, ...saleCommercialFields(receiptFields, { partial: true }) };
     } else {
       const sellerId = level === 'own' ? req.userId : (req.body.seller_id || existing.seller_id);

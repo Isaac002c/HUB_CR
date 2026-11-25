@@ -1101,7 +1101,31 @@ async function getSales(tenantId, { start, end, teamId, sellerId, limit = 100, o
 async function getInstallmentFollowUps(tenantId, {
   teamId, sellerId, supervisorId, periodStart, periodEnd,
 } = {}) {
-  const { where, params, nextIndex } = salesFilter(tenantId, { teamId, sellerId, supervisorId });
+  const clauses = [
+    's.tenant_id = $1',
+    "LOWER(COALESCE(s.status, 'confirmed')) NOT IN ('canceled','cancelled','refunded','reversed','invalid')",
+    's.installment_plan_id IS NOT NULL',
+    's.installment_total IS NOT NULL',
+  ];
+  const params = [tenantId];
+  let nextIndex = 2;
+  if (sellerId) {
+    clauses.push(`COALESCE(client_owner.id, s.seller_id) = $${nextIndex}`);
+    params.push(sellerId);
+    nextIndex += 1;
+  }
+  if (teamId) {
+    clauses.push(`COALESCE(client_owner.team_id, s.team_id) = $${nextIndex}`);
+    params.push(teamId);
+    nextIndex += 1;
+  }
+  if (supervisorId) {
+    clauses.push(`(COALESCE(client_owner.role, s.seller_role_snapshot, seller.role) = 'seller'
+      OR COALESCE(client_owner.id, s.seller_id) = $${nextIndex})`);
+    params.push(supervisorId);
+    nextIndex += 1;
+  }
+  const where = clauses.join(' AND ');
   const selectedStart = periodStart || new Date().toISOString().substring(0, 7) + '-01';
   const selectedEnd = periodEnd || (() => {
     const nextMonth = new Date(`${selectedStart}T12:00:00Z`);
@@ -1114,16 +1138,19 @@ async function getInstallmentFollowUps(tenantId, {
   const result = await pool.query(
     `WITH scoped AS (
        SELECT s.*,
-              COALESCE(s.seller_display_name_snapshot, seller.name) AS seller_name,
+              COALESCE(client_owner.id, s.seller_id) AS responsible_seller_id,
+              COALESCE(client_owner.name, s.seller_display_name_snapshot, seller.name) AS seller_name,
+              COALESCE(client_owner.team_id, s.team_id) AS responsible_team_id,
+              COALESCE(client_owner.role, s.seller_role_snapshot, seller.role) AS responsible_role,
               ROW_NUMBER() OVER (
                 PARTITION BY s.installment_plan_id
                 ORDER BY s.installment_number DESC, s.closed_at DESC, s.created_at DESC
               ) AS row_number
          FROM sales s
          LEFT JOIN users seller ON seller.id = s.seller_id
+         LEFT JOIN clients client ON client.id = s.client_id AND client.tenant_id = s.tenant_id
+         LEFT JOIN users client_owner ON client_owner.id = client.created_by AND client_owner.tenant_id = client.tenant_id
         WHERE ${where}
-          AND s.installment_plan_id IS NOT NULL
-          AND s.installment_total IS NOT NULL
      ), open_plans AS (
        SELECT * FROM scoped
         WHERE row_number = 1
@@ -1220,14 +1247,20 @@ async function resolveInstallmentPlanId(data) {
   if (!data.installment_total) return null;
   if (data.installment_plan_id) {
     const existing = await pool.query(
-      `SELECT installment_plan_id
-         FROM sales
-        WHERE tenant_id = $1 AND installment_plan_id = $2
-          AND seller_id = $3
+      `SELECT schedule.installment_plan_id
+         FROM sales_installment_schedule schedule
+         JOIN sales origin
+           ON origin.tenant_id = schedule.tenant_id
+          AND origin.installment_plan_id = schedule.installment_plan_id
+        WHERE schedule.tenant_id = $1
+          AND schedule.installment_plan_id = $2
+          AND schedule.installment_number = $3
+          AND schedule.status = 'scheduled'
+          AND ($4::uuid IS NULL OR origin.client_id = $4::uuid)
         LIMIT 1`,
-      [data.tenant_id, data.installment_plan_id, data.seller_id]
+      [data.tenant_id, data.installment_plan_id, Number(data.installment_number), data.client_id || null]
     );
-    if (!existing.rowCount) throw domainError('Parcelamento não encontrado para esse responsável.', 'INVALID_INSTALLMENT_PLAN');
+    if (!existing.rowCount) throw domainError('Parcela programada não encontrada para este cliente.', 'INVALID_INSTALLMENT_PLAN');
     return data.installment_plan_id;
   }
   if (Number(data.installment_number) > 1) {
@@ -1266,10 +1299,16 @@ async function getLatestInstallmentPlanRow(tenantId, planId, sellerId) {
 
 async function getLatestInstallmentPlan(tenantId, planId) {
   const result = await pool.query(
-    `SELECT *
-       FROM sales
-      WHERE tenant_id = $1 AND installment_plan_id = $2
-      ORDER BY installment_number DESC, closed_at DESC, created_at DESC
+    `SELECT sale.*,
+            COALESCE(owner.id, sale.seller_id) AS assigned_seller_id,
+            COALESCE(owner.role, sale.seller_role_snapshot, seller.role) AS assigned_seller_role,
+            COALESCE(owner.team_id, sale.team_id) AS assigned_team_id
+       FROM sales sale
+       LEFT JOIN clients client ON client.id = sale.client_id AND client.tenant_id = sale.tenant_id
+       LEFT JOIN users owner ON owner.id = client.created_by AND owner.tenant_id = client.tenant_id
+       LEFT JOIN users seller ON seller.id = sale.seller_id AND seller.tenant_id = sale.tenant_id
+      WHERE sale.tenant_id = $1 AND sale.installment_plan_id = $2
+      ORDER BY sale.installment_number DESC, sale.closed_at DESC, sale.created_at DESC
       LIMIT 1`,
     [tenantId, planId]
   );
@@ -1380,7 +1419,15 @@ async function createSale(data) {
     payment_method = null, closing_method = null,
     amount = 0, closed_at = null, status = 'confirmed', created_by = null,
     seller_display_name = null,
+    late_charges_override_amount = null,
   } = data;
+
+  const lateChargesOverride = late_charges_override_amount === null || late_charges_override_amount === undefined
+    ? null
+    : Number(late_charges_override_amount);
+  if (lateChargesOverride !== null && (!Number.isFinite(lateChargesOverride) || lateChargesOverride < 0)) {
+    throw domainError('O valor manual dos encargos é inválido.', 'VALIDATION');
+  }
 
   // Snapshot financeiro + organizacional vigente no fechamento.
   let seller = await getSellerCommissionPct(seller_id, tenant_id, { amount, closedAt: closed_at });
@@ -1439,13 +1486,26 @@ async function createSale(data) {
     if (installment_total && Number(installment_number) > 1) {
       const latestResult = await client.query(
         `SELECT * FROM sales
-          WHERE tenant_id = $1 AND installment_plan_id = $2 AND seller_id = $3
+          WHERE tenant_id = $1 AND installment_plan_id = $2
           ORDER BY installment_number DESC, closed_at DESC, created_at DESC
           LIMIT 1 FOR UPDATE`,
-        [tenant_id, resolvedPlanId, seller_id]
+        [tenant_id, resolvedPlanId]
       );
       const latest = latestResult.rows[0];
-      if (!latest) throw domainError('Parcelamento não encontrado para esse responsável.', 'INVALID_INSTALLMENT_PLAN');
+      if (!latest) throw domainError('Parcelamento não encontrado.', 'INVALID_INSTALLMENT_PLAN');
+      if (latest.client_id && client_id && latest.client_id !== client_id) {
+        throw domainError('O parcelamento não pertence a este cliente.', 'INVALID_INSTALLMENT_PLAN');
+      }
+      if (latest.client_id) {
+        const currentOwner = await client.query(
+          `SELECT created_by FROM clients WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
+          [latest.client_id, tenant_id]
+        );
+        const currentOwnerId = currentOwner.rows[0]?.created_by;
+        if (currentOwnerId && currentOwnerId !== seller_id) {
+          throw domainError('O responsável desta cobrança mudou. Atualize a tela e tente novamente.', 'INSTALLMENT_OWNER_CHANGED');
+        }
+      }
       latestScheduledSale = latest;
       if (Number(installment_number) !== Number(latest.installment_number) + 1) {
         throw domainError('Essa parcela já foi recebida ou existe uma parcela anterior pendente.', 'INVALID_INSTALLMENT_SEQUENCE');
@@ -1577,17 +1637,21 @@ async function createSale(data) {
         expectedAmount: scheduledPayment.expected_amount,
         priorPayments: priorReceipts.rows,
       });
-      if (Number(amount) > scheduledBalance + lateCharges.total + 0.000001) {
+      if (lateChargesOverride !== null && lateCharges.lateDays <= 0) {
+        throw domainError('O ajuste manual de encargos só é permitido em parcelas vencidas.', 'INVALID_INSTALLMENT_AMOUNT');
+      }
+      const allowedLateCharges = lateChargesOverride ?? lateCharges.total;
+      if (Number(amount) > scheduledBalance + allowedLateCharges + 0.000001) {
         throw domainError(
           lateCharges.total > 0
-            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${lateCharges.total.toFixed(2)}).`
+            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos permitidos (${allowedLateCharges.toFixed(2)}).`
             : 'O valor recebido não pode superar o saldo desta cobrança.',
           'INVALID_INSTALLMENT_AMOUNT'
         );
       }
       principalReceivedNow = Math.min(Number(amount), scheduledBalance);
       lateChargesAmount = Number((Number(amount) - principalReceivedNow).toFixed(2));
-      if (lateChargesAmount > lateCharges.total + 0.000001) {
+      if (lateChargesAmount > allowedLateCharges + 0.000001) {
         throw domainError('Os encargos por atraso excedem o limite previsto no contrato.', 'INVALID_INSTALLMENT_AMOUNT');
       }
       if (lateChargesAmount > 0) {
@@ -1624,9 +1688,9 @@ async function createSale(data) {
            installment_schedule_id,
            payment_method, closing_method, amount, commission_percentage,
            commissionable_amount, commission_trigger_amount, commission_amount, status,
-           closed_at, source, created_by, late_charges_amount)
+           closed_at, source, created_by, late_charges_amount, late_charges_override_amount)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-               COALESCE($30, CURRENT_DATE), 'manual', $31, $32)
+               COALESCE($30, CURRENT_DATE), 'manual', $31, $32, $33)
        RETURNING *`,
       [tenant_id, seller_id, team_id, seller_role_snapshot, seller_display_name || seller.name, supervisor_id,
        client_id, company_id, lead_id, fine_id,
@@ -1635,7 +1699,7 @@ async function createSale(data) {
        saleScheduleId,
        payment_method, closing_method, amount, commission_percentage,
        commissionable_amount, commission_trigger_amount, commission_amount, status,
-       closed_at, created_by, lateChargesAmount]
+       closed_at, created_by, lateChargesAmount, lateChargesOverride]
     );
     const sale = saleResult.rows[0];
 
@@ -1769,6 +1833,19 @@ async function updateSale(id, data, tenantId) {
   let linkedSchedulePaidSaleAfterEdit = null;
   let linkedNextDueDateAfterEdit;
   let lateChargesAmount = Number(current.late_charges_amount || 0);
+  let lateChargesOverrideAmount = current.late_charges_override_amount === null
+    || current.late_charges_override_amount === undefined
+    ? null
+    : Number(current.late_charges_override_amount);
+  if (Object.prototype.hasOwnProperty.call(data, 'late_charges_override_amount')) {
+    lateChargesOverrideAmount = data.late_charges_override_amount === null
+      ? null
+      : Number(data.late_charges_override_amount);
+    if (lateChargesOverrideAmount !== null
+      && (!Number.isFinite(lateChargesOverrideAmount) || lateChargesOverrideAmount < 0)) {
+      throw domainError('O valor manual dos encargos é inválido.', 'VALIDATION');
+    }
+  }
   if (current.installment_schedule_id) {
     const scheduleResult = await client.query(
       `SELECT * FROM sales_installment_schedule
@@ -1827,11 +1904,15 @@ async function updateSale(id, data, tenantId) {
         expectedAmount,
         priorPayments: priorReceipts.rows,
       });
+      if (lateChargesOverrideAmount !== null && lateCharges.lateDays <= 0) {
+        throw domainError('O ajuste manual de encargos só é permitido em parcelas vencidas.', 'INVALID_INSTALLMENT_AMOUNT');
+      }
+      const allowedLateCharges = lateChargesOverrideAmount ?? lateCharges.total;
       if (!Number.isFinite(amount) || amount <= 0
-        || amount > principalBalance + lateCharges.total + 0.000001) {
+        || amount > principalBalance + allowedLateCharges + 0.000001) {
         throw domainError(
           lateCharges.total > 0
-            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${lateCharges.total.toFixed(2)}).`
+            ? `O valor recebido supera o saldo desta cobrança acrescido dos encargos permitidos (${allowedLateCharges.toFixed(2)}).`
             : 'O valor recebido não pode superar o saldo desta cobrança.',
           'INVALID_INSTALLMENT_AMOUNT'
         );
@@ -1839,7 +1920,7 @@ async function updateSale(id, data, tenantId) {
       const principalReceived = Math.min(amount, principalBalance);
       lateChargesAmount = Number((amount - principalReceived).toFixed(2));
       adjustedReceivedAmount = Number((receivedByOtherPayments + principalReceived).toFixed(2));
-      if (lateChargesAmount > lateCharges.total + 0.000001) {
+      if (lateChargesAmount > allowedLateCharges + 0.000001) {
         throw domainError('Os encargos por atraso excedem o limite previsto no contrato.', 'INVALID_INSTALLMENT_AMOUNT');
       }
       const nowFullyReceived = Math.abs(adjustedReceivedAmount - expectedAmount) <= 0.000001;
@@ -1876,11 +1957,11 @@ async function updateSale(id, data, tenantId) {
         // the installment identity when that edit completes the scheduled item.
         const sourcePlan = await client.query(
           `SELECT installment_frequency FROM sales
-            WHERE tenant_id = $1 AND installment_plan_id = $2 AND seller_id = $3
+            WHERE tenant_id = $1 AND installment_plan_id = $2
               AND installment_number IS NOT NULL
             ORDER BY installment_number DESC, closed_at DESC, created_at DESC
             LIMIT 1`,
-          [tenantId, linkedSchedule.installment_plan_id, current.seller_id]
+          [tenantId, linkedSchedule.installment_plan_id]
         );
         installmentChanged = true;
         nextInstallmentNumber = Number(linkedSchedule.installment_number);
@@ -1933,6 +2014,7 @@ async function updateSale(id, data, tenantId) {
         status = COALESCE($27, status),
         closed_at = COALESCE($28, closed_at),
         late_charges_amount = $31,
+        late_charges_override_amount = $32,
         updated_at = NOW()
       WHERE id = $29 AND tenant_id = $30 RETURNING *`,
     [
@@ -1948,7 +2030,8 @@ async function updateSale(id, data, tenantId) {
         : (settled ? null : (data.next_installment_due_date ?? current.next_installment_due_date ?? null)), settled,
       data.payment_method ?? null, data.closing_method ?? null,
       amount, commission_percentage, commissionable_amount, commission_trigger_amount,
-      commission_amount, data.status ?? null, data.closed_at ?? null, id, tenantId, lateChargesAmount,
+      commission_amount, data.status ?? null, data.closed_at ?? null, id, tenantId,
+      lateChargesAmount, lateChargesOverrideAmount,
     ]
   );
   if (adjustedReceivedAmount !== null) {

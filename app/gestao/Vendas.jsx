@@ -100,7 +100,7 @@ export default function Vendas() {
         const installmentTotal = Number(installment.installment_total);
         const finalInstallment = installmentNumber >= installmentTotal;
         await createSale({
-          seller_id: installment.seller_id,
+          seller_id: installment.responsible_seller_id || installment.seller_id,
           seller_display_name: installment.seller_name,
           client_id: installment.client_id || null,
           company_id: installment.company_id || null,
@@ -121,6 +121,9 @@ export default function Vendas() {
           payment_method: form.payment_method,
           closing_method: installment.closing_method || 'remoto',
           status: 'confirmed',
+          ...(form.late_charges_override_amount !== undefined
+            ? { late_charges_override_amount: form.late_charges_override_amount }
+            : {}),
         });
       } else {
         await updateInstallmentSchedule(installment.installment_plan_id, form);
@@ -172,7 +175,7 @@ export default function Vendas() {
   const isGeneral = selectedSeller === 'all';
   const visibleFollowUps = selectedSeller === 'all'
     ? installmentFollowUps
-    : installmentFollowUps.filter((item) => item.seller_id === selectedSeller);
+    : installmentFollowUps.filter((item) => (item.responsible_seller_id || item.seller_id) === selectedSeller);
 
   if (loading && sales.length === 0) return <Loading />;
 
@@ -324,6 +327,7 @@ export default function Vendas() {
       />}
       {scheduleModal && <InstallmentScheduleModal
         installment={scheduleModal}
+        canOverrideLateCharges={role === 'master'}
         onClose={() => setScheduleModal(null)}
         onSubmit={submitSchedule}
       />}
@@ -496,7 +500,7 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
   </div>;
 }
 
-function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
+function InstallmentScheduleModal({ installment, canOverrideLateCharges = false, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
     next_installment_due_date: String(installment.next_installment_due_date || '').substring(0, 10),
@@ -511,6 +515,7 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
     closed_at: initialPaymentDate,
     payment_method: installment.payment_method || 'a_vista',
   });
+  const [manualLateCharges, setManualLateCharges] = useState('');
   const set = (key) => (event) => setForm((previous) => ({ ...previous, [key]: event.target.value }));
   const setPaymentField = (key) => (event) => setPayment((previous) => ({ ...previous, [key]: event.target.value }));
   const principalBalance = Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0);
@@ -520,7 +525,10 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
     expectedAmount: form.next_installment_amount,
     priorPayments: Array.isArray(installment.prior_payments) ? installment.prior_payments : [],
   });
-  const suggestedAmount = Number((principalBalance + lateCharges.total).toFixed(2));
+  const lateChargesLimit = canOverrideLateCharges && manualLateCharges !== ''
+    ? Math.max(Number(manualLateCharges) || 0, 0)
+    : lateCharges.total;
+  const suggestedAmount = Number((principalBalance + lateChargesLimit).toFixed(2));
   const amountNow = payment.amount === 'auto' ? suggestedAmount : Number(payment.amount) || 0;
   const balanceAfterPayment = Math.max(principalBalance - Math.min(amountNow, principalBalance), 0);
 
@@ -537,7 +545,7 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
         if (!form.next_installment_amount || Number(form.next_installment_amount) <= 0) return alert('Informe um valor previsto válido.');
         if (amountNow > 0 && !installment.is_next_installment) return alert('É necessário registrar primeiro o recebimento da parcela anterior.');
         if (amountNow > 0 && !payment.closed_at) return alert('Informe a data em que o pagamento foi recebido.');
-        if (amountNow > principalBalance + lateCharges.total + 0.000001) return alert(`O valor recebido supera o saldo desta cobrança acrescido dos encargos calculados (${formatBRL(lateCharges.total)}).`);
+        if (amountNow > principalBalance + lateChargesLimit + 0.000001) return alert(`O valor recebido supera o saldo desta cobrança acrescido dos encargos permitidos (${formatBRL(lateChargesLimit)}).`);
         if (amountNow > 0 && !payment.payment_method) return alert('Selecione a forma de pagamento.');
         setSubmitting(true);
         const succeeded = await onSubmit({
@@ -548,6 +556,9 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
           received_amount: amountNow,
           received_at: payment.closed_at,
           payment_method: payment.payment_method,
+          ...(canOverrideLateCharges && manualLateCharges !== ''
+            ? { late_charges_override_amount: Number(manualLateCharges) }
+            : {}),
         });
         if (!succeeded) setSubmitting(false);
       }}>
@@ -585,7 +596,16 @@ function InstallmentScheduleModal({ installment, onClose, onSubmit }) {
             </div>
             {lateCharges.total > 0 && <div style={paymentConfirmationInfo}>
               <strong>Encargos por atraso até {formatDate(payment.closed_at)}:</strong> multa de 2%: {formatBRL(lateCharges.fine)} · juros de 1% ao mês, proporcionais a {lateCharges.lateDays} dias: {formatBRL(lateCharges.interest)}.
-              <br /><strong>Total sugerido para quitar:</strong> {formatBRL(suggestedAmount)}. Você pode ajustar o valor; o sistema limita o acréscimo aos encargos calculados.
+              {canOverrideLateCharges && <div style={{ marginTop: 8 }}>
+                <Field label="Encargos para esta cobrança (R$) · ajuste MASTER">
+                  <input type="number" step="0.01" min="0" value={manualLateCharges === '' ? lateCharges.total : manualLateCharges} onChange={(event) => {
+                    setManualLateCharges(event.target.value);
+                    setPayment((previous) => ({ ...previous, amount: 'auto' }));
+                  }} />
+                </Field>
+                <div style={{ ...muted, marginTop: 4 }}>Cálculo contratual sugerido: {formatBRL(lateCharges.total)}. O MASTER pode informar outro valor; o ajuste ficará registrado.</div>
+              </div>}
+              <br /><strong>Total sugerido para quitar:</strong> {formatBRL(suggestedAmount)}. O valor recebido pode ser ajustado até o limite de encargos permitido.
             </div>}
             <div style={{ ...muted, marginTop: -5 }}>
               Saldo principal após este recebimento: <strong>{formatBRL(balanceAfterPayment)}</strong>{amountNow > 0 && balanceAfterPayment > 0 ? ' · continuará em aberto.' : amountNow > 0 ? ' · será quitada.' : ''}

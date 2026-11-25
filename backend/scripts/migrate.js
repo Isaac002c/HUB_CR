@@ -73,6 +73,7 @@ const migrations = [
   'gestao_32_installment_schedule_dismissals.sql',
   'gestao_33_partial_installment_payments.sql',
   'gestao_34_installment_late_charges.sql',
+  'gestao_35_late_charge_master_override.sql',
 ];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
