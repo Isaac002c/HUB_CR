@@ -291,12 +291,20 @@ function installmentScheduleFields(body) {
   if (installmentNumber !== null && (!Number.isInteger(installmentNumber) || installmentNumber < 2 || installmentNumber > 120)) {
     throw Object.assign(new Error('Número da parcela inválido.'), { code: 'VALIDATION' });
   }
-  return {
+  const fields = {
     installment_number: installmentNumber,
     next_installment_due_date: dueDate,
     next_installment_amount: amount,
     installment_frequency: frequency,
   };
+  if (Object.prototype.hasOwnProperty.call(body, 'responsible_seller_id')) {
+    const responsibleSellerId = body.responsible_seller_id === '' ? null : body.responsible_seller_id;
+    if (responsibleSellerId !== null && (typeof responsibleSellerId !== 'string' || !UUID_PATTERN.test(responsibleSellerId))) {
+      throw Object.assign(new Error('Selecione um consultor válido para esta cobrança.'), { code: 'VALIDATION' });
+    }
+    fields.responsible_seller_id = responsibleSellerId;
+  }
+  return fields;
 }
 
 async function assertSellerAllowed(req, sellerId) {
@@ -1069,7 +1077,8 @@ router.patch('/sales/installments/:planId', async (req, res) => {
     if (!UUID_PATTERN.test(req.params.planId)) {
       return res.status(400).json({ success: false, error: 'Parcelamento inválido.' });
     }
-    const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId);
+    const schedule = installmentScheduleFields(req.body);
+    const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId, schedule.installment_number);
     if (!existing) return res.status(404).json({ success: false, error: 'Cobrança não encontrada.' });
     const level = access.accessLevel(req.userRole, 'gestao');
     if (level === 'own' && existing.assigned_seller_id !== req.userId) {
@@ -1081,7 +1090,25 @@ router.patch('/sales/installments/:planId', async (req, res) => {
         && (visibleRole === 'seller' || existing.assigned_seller_id === req.userId);
       if (!visibleSchedule) return res.status(403).json({ success: false, error: 'Cobrança fora da sua equipe.' });
     }
-    const schedule = installmentScheduleFields(req.body);
+    if (Object.prototype.hasOwnProperty.call(schedule, 'responsible_seller_id')) {
+      const actorRole = String(req.userRole || '').toLowerCase();
+      if (!['master', 'supervisor'].includes(actorRole)) {
+        return res.status(403).json({ success: false, error: 'Somente Master e Supervisão podem alterar o consultor desta cobrança.' });
+      }
+      if (schedule.responsible_seller_id) {
+        const responsible = await mgmt.getSellerCommissionPct(schedule.responsible_seller_id, req.tenantId);
+        if (!responsible || responsible.role !== 'seller') {
+          return res.status(400).json({ success: false, error: 'Selecione um consultor ativo.' });
+        }
+        if (actorRole === 'supervisor' && (!req.teamId || responsible.team_id !== req.teamId)) {
+          return res.status(403).json({ success: false, error: 'A Supervisão só pode atribuir cobranças a consultores da própria equipe.' });
+        }
+      } else if (actorRole === 'supervisor'
+        && existing.automatic_team_id !== req.teamId
+        && existing.automatic_seller_id !== req.userId) {
+        return res.status(403).json({ success: false, error: 'A Supervisão não pode devolver esta cobrança para um responsável de outra equipe.' });
+      }
+    }
     const updated = await mgmt.updateInstallmentSchedule(req.params.planId, schedule, req.tenantId);
     await logActivity({
       tenant_id: req.tenantId,

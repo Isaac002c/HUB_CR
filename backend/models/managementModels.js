@@ -1109,23 +1109,24 @@ async function getInstallmentFollowUps(tenantId, {
   ];
   const params = [tenantId];
   let nextIndex = 2;
+  const where = clauses.join(' AND ');
+  const ownershipClauses = [];
   if (sellerId) {
-    clauses.push(`COALESCE(client_owner.id, s.seller_id) = $${nextIndex}`);
+    ownershipClauses.push(`COALESCE(schedule_owner_id, fallback_responsible_seller_id) = $${nextIndex}`);
     params.push(sellerId);
     nextIndex += 1;
   }
   if (teamId) {
-    clauses.push(`COALESCE(client_owner.team_id, s.team_id) = $${nextIndex}`);
+    ownershipClauses.push(`COALESCE(schedule_owner_team_id, fallback_responsible_team_id) = $${nextIndex}`);
     params.push(teamId);
     nextIndex += 1;
   }
   if (supervisorId) {
-    clauses.push(`(COALESCE(client_owner.role, s.seller_role_snapshot, seller.role) = 'seller'
-      OR COALESCE(client_owner.id, s.seller_id) = $${nextIndex})`);
+    ownershipClauses.push(`(COALESCE(schedule_owner_role, fallback_responsible_role) = 'seller'
+      OR COALESCE(schedule_owner_id, fallback_responsible_seller_id) = $${nextIndex})`);
     params.push(supervisorId);
     nextIndex += 1;
   }
-  const where = clauses.join(' AND ');
   const selectedStart = periodStart || new Date().toISOString().substring(0, 7) + '-01';
   const selectedEnd = periodEnd || (() => {
     const nextMonth = new Date(`${selectedStart}T12:00:00Z`);
@@ -1138,10 +1139,10 @@ async function getInstallmentFollowUps(tenantId, {
   const result = await pool.query(
     `WITH scoped AS (
        SELECT s.*,
-              COALESCE(client_owner.id, s.seller_id) AS responsible_seller_id,
-              COALESCE(client_owner.name, s.seller_display_name_snapshot, seller.name) AS seller_name,
-              COALESCE(client_owner.team_id, s.team_id) AS responsible_team_id,
-              COALESCE(client_owner.role, s.seller_role_snapshot, seller.role) AS responsible_role,
+              COALESCE(client_owner.id, s.seller_id) AS fallback_responsible_seller_id,
+              COALESCE(client_owner.name, s.seller_display_name_snapshot, seller.name) AS fallback_seller_name,
+              COALESCE(client_owner.team_id, s.team_id) AS fallback_responsible_team_id,
+              COALESCE(client_owner.role, s.seller_role_snapshot, seller.role) AS fallback_responsible_role,
               ROW_NUMBER() OVER (
                 PARTITION BY s.installment_plan_id
                 ORDER BY s.installment_number DESC, s.closed_at DESC, s.created_at DESC
@@ -1178,6 +1179,11 @@ async function getInstallmentFollowUps(tenantId, {
        SELECT open_plans.*,
               item.installment_number AS next_installment_number,
               item.id AS schedule_id,
+              item.responsible_seller_id AS scheduled_responsible_seller_id,
+              schedule_owner.id AS schedule_owner_id,
+              schedule_owner.name AS schedule_owner_name,
+              schedule_owner.team_id AS schedule_owner_team_id,
+              schedule_owner.role AS schedule_owner_role,
               item.installment_number = open_plans.installment_number + 1 AS is_next_installment,
               item.due_date AS projected_due_date,
               item.expected_amount AS expected_amount,
@@ -1189,6 +1195,9 @@ async function getInstallmentFollowUps(tenantId, {
            ON item.tenant_id = open_plans.tenant_id
           AND item.installment_plan_id = open_plans.installment_plan_id
           AND item.status = 'scheduled'
+         LEFT JOIN users schedule_owner
+           ON schedule_owner.id = item.responsible_seller_id
+          AND schedule_owner.tenant_id = item.tenant_id
          LEFT JOIN LATERAL (
            SELECT COALESCE(
                     JSON_AGG(
@@ -1206,6 +1215,10 @@ async function getInstallmentFollowUps(tenantId, {
          ) receipt_history ON TRUE
      )
      SELECT scheduled.*,
+            COALESCE(schedule_owner_id, fallback_responsible_seller_id) AS responsible_seller_id,
+            COALESCE(schedule_owner_name, fallback_seller_name) AS seller_name,
+            COALESCE(schedule_owner_team_id, fallback_responsible_team_id) AS responsible_team_id,
+            COALESCE(schedule_owner_role, fallback_responsible_role) AS responsible_role,
             projected_due_date AS next_installment_due_date,
             CASE
               WHEN projected_due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date THEN 'overdue'
@@ -1213,13 +1226,15 @@ async function getInstallmentFollowUps(tenantId, {
               ELSE 'upcoming'
             END AS follow_up_status
        FROM scheduled
-      WHERE (
+      WHERE ${ownershipClauses.length ? `(${ownershipClauses.join(' AND ')}) AND` : ''}
+      (
+        (
         projected_due_date >= $${periodStartIndex}::date
         AND projected_due_date < $${periodEndIndex}::date
       ) OR (
         projected_due_date < $${periodStartIndex}::date
         AND projected_due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
-      )
+      ))
       ORDER BY projected_due_date ASC NULLS LAST, customer_name ASC, next_installment_number ASC
       LIMIT 200`,
     params
@@ -1315,13 +1330,29 @@ async function getLatestInstallmentPlanRow(tenantId, planId, sellerId) {
   return result.rows[0] || null;
 }
 
-async function getLatestInstallmentPlan(tenantId, planId) {
+async function getLatestInstallmentPlan(tenantId, planId, installmentNumber = null) {
   const result = await pool.query(
     `SELECT sale.*,
-            COALESCE(owner.id, sale.seller_id) AS assigned_seller_id,
-            COALESCE(owner.role, sale.seller_role_snapshot, seller.role) AS assigned_seller_role,
-            COALESCE(owner.team_id, sale.team_id) AS assigned_team_id
+            schedule.responsible_seller_id AS scheduled_responsible_seller_id,
+            COALESCE(schedule_owner.id, owner.id, sale.seller_id) AS assigned_seller_id,
+            COALESCE(schedule_owner.role, owner.role, sale.seller_role_snapshot, seller.role) AS assigned_seller_role,
+            COALESCE(schedule_owner.team_id, owner.team_id, sale.team_id) AS assigned_team_id,
+            COALESCE(owner.id, sale.seller_id) AS automatic_seller_id,
+            COALESCE(owner.role, sale.seller_role_snapshot, seller.role) AS automatic_seller_role,
+            COALESCE(owner.team_id, sale.team_id) AS automatic_team_id
        FROM sales sale
+       LEFT JOIN LATERAL (
+         SELECT item.responsible_seller_id
+           FROM sales_installment_schedule item
+          WHERE item.tenant_id = sale.tenant_id
+            AND item.installment_plan_id = sale.installment_plan_id
+            AND item.status = 'scheduled'
+          ORDER BY CASE WHEN $3::integer IS NOT NULL AND item.installment_number = $3::integer THEN 0 ELSE 1 END,
+                   item.installment_number ASC
+          LIMIT 1
+       ) schedule ON TRUE
+       LEFT JOIN users schedule_owner
+         ON schedule_owner.id = schedule.responsible_seller_id AND schedule_owner.tenant_id = sale.tenant_id
        LEFT JOIN LATERAL (
          SELECT linked_client.id, linked_client.created_by
            FROM clients linked_client
@@ -1346,13 +1377,13 @@ async function getLatestInstallmentPlan(tenantId, planId) {
       WHERE sale.tenant_id = $1 AND sale.installment_plan_id = $2
       ORDER BY sale.installment_number DESC, sale.closed_at DESC, sale.created_at DESC
       LIMIT 1`,
-    [tenantId, planId]
+    [tenantId, planId, installmentNumber]
   );
   return result.rows[0] || null;
 }
 
 async function updateInstallmentSchedule(planId, data, tenantId) {
-  const latest = await getLatestInstallmentPlan(tenantId, planId);
+  const latest = await getLatestInstallmentPlan(tenantId, planId, data.installment_number);
   if (!latest) return null;
   if (latest.is_settlement || Number(latest.installment_number) >= Number(latest.installment_total)) {
     throw domainError('Esse parcelamento já está quitado.', 'INVALID_INSTALLMENT_PLAN');
@@ -1382,13 +1413,17 @@ async function updateInstallmentSchedule(planId, data, tenantId) {
     || (followingDueDate && String(data.next_installment_due_date) >= dateOnly(followingDueDate))) {
     throw domainError('O vencimento deve ficar entre as demais parcelas do plano.', 'INVALID_INSTALLMENT_DUE_DATE');
   }
+  const hasResponsibleSeller = Object.prototype.hasOwnProperty.call(data, 'responsible_seller_id');
   const result = await pool.query(
     `UPDATE sales_installment_schedule
-        SET due_date = $1, expected_amount = $2, updated_at = NOW()
+        SET due_date = $1, expected_amount = $2,
+            responsible_seller_id = CASE WHEN $6::boolean THEN $7::uuid ELSE responsible_seller_id END,
+            updated_at = NOW()
       WHERE tenant_id = $3 AND installment_plan_id = $4
         AND installment_number = $5 AND status = 'scheduled'
       RETURNING *`,
-    [data.next_installment_due_date, data.next_installment_amount, tenantId, planId, installmentNumber]
+    [data.next_installment_due_date, data.next_installment_amount, tenantId, planId, installmentNumber,
+      hasResponsibleSeller, data.responsible_seller_id || null]
   );
   if (!result.rowCount) throw domainError('Esta cobrança já foi paga ou não está mais programada.', 'INVALID_INSTALLMENT_PLAN');
   if (installmentNumber === Number(latest.installment_number) + 1) {
@@ -1398,7 +1433,12 @@ async function updateInstallmentSchedule(planId, data, tenantId) {
       [data.next_installment_due_date, data.next_installment_amount, latest.id, tenantId]
     );
   }
-  return { ...latest, next_installment_due_date: data.next_installment_due_date, next_installment_amount: data.next_installment_amount };
+  return {
+    ...latest,
+    scheduled_responsible_seller_id: result.rows[0].responsible_seller_id,
+    next_installment_due_date: data.next_installment_due_date,
+    next_installment_amount: data.next_installment_amount,
+  };
 }
 
 function addInstallmentPeriod(dateText, frequency) {
@@ -1532,6 +1572,7 @@ async function createSale(data) {
       if (latest.client_id && client_id && latest.client_id !== client_id) {
         throw domainError('O parcelamento não pertence a este cliente.', 'INVALID_INSTALLMENT_PLAN');
       }
+      let currentOwnerId = null;
       {
         const currentOwner = await client.query(
           `SELECT linked_client.created_by
@@ -1554,10 +1595,7 @@ async function createSale(data) {
             FOR SHARE OF linked_client`,
           [tenant_id, latest.client_id || null, latest.customer_name || null]
         );
-        const currentOwnerId = currentOwner.rows[0]?.created_by;
-        if (currentOwnerId && currentOwnerId !== seller_id) {
-          throw domainError('O responsável desta cobrança mudou. Atualize a tela e tente novamente.', 'INSTALLMENT_OWNER_CHANGED');
-        }
+        currentOwnerId = currentOwner.rows[0]?.created_by || null;
       }
       latestScheduledSale = latest;
       if (Number(installment_number) !== Number(latest.installment_number) + 1) {
@@ -1577,6 +1615,10 @@ async function createSale(data) {
       scheduledPayment = scheduledResult.rows[0];
       if (!scheduledPayment) {
         throw domainError('A parcela não está mais programada. Atualize a tela e tente novamente.', 'INVALID_INSTALLMENT_SEQUENCE');
+      }
+      const expectedResponsibleId = scheduledPayment.responsible_seller_id || currentOwnerId;
+      if (expectedResponsibleId && expectedResponsibleId !== seller_id) {
+        throw domainError('O responsável desta cobrança mudou. Atualize a tela e tente novamente.', 'INSTALLMENT_OWNER_CHANGED');
       }
       if (installment_schedule_adjustment) {
         const adjustedDueDate = String(installment_schedule_adjustment.next_installment_due_date || '').substring(0, 10);

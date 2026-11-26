@@ -163,6 +163,7 @@ async function main() {
   await runSql('gestao_33_partial_installment_payments.sql');
   await runSql('gestao_34_installment_late_charges.sql');
   await runSql('gestao_35_late_charge_master_override.sql');
+  await runSql('gestao_36_installment_schedule_responsible.sql');
   await runSql('gestao_28_cpf_duplicate_guard.sql');
   const supervisionLogin = await one(`SELECT name, email, role, is_active FROM users WHERE id=$1`, [sup.id]);
   const requestedLogins = (await db.query(
@@ -1193,15 +1194,56 @@ async function main() {
       && unlinkedChargeRow?.responsible_seller_id === s2.id
       && unlinkedChargeRow?.seller_name === s2.name,
     JSON.stringify({ client: unlinkedClientTransfer.json, charge: unlinkedChargeRow }));
+  const installmentAssignmentBody = {
+    installment_number: 2,
+    next_installment_due_date: reassignedDueDate,
+    next_installment_amount: 250,
+    installment_frequency: 'monthly',
+    responsible_seller_id: s2.id,
+  };
+  const teamAlternative = (await appPool.query(
+    `SELECT id FROM users WHERE tenant_id=$1 AND team_id=$2 AND role='seller' AND id<>$3
+       AND COALESCE(is_active,true)=true ORDER BY name LIMIT 1`,
+    [T1.id, teamA.id, s2.id],
+  )).rows[0];
+  const masterAssignedInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), installmentAssignmentBody);
+  const sellerCannotReassignInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
+    ...installmentAssignmentBody, responsible_seller_id: s1.id,
+  });
+  const supervisorCannotAssignOutsideTeam = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
+    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id,
+  });
+  const supervisorAssignedInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
+    ...installmentAssignmentBody, responsible_seller_id: teamAlternative?.id,
+  });
+  const masterFinalAssignment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), {
+    ...installmentAssignmentBody, responsible_seller_id: s1.id,
+  });
+  check('Master e Supervisão podem escolher responsável; consultor e consultor externo não podem',
+    Boolean(teamAlternative?.id) && masterAssignedInstallment.status === 200
+      && sellerCannotReassignInstallment.status === 403
+      && supervisorCannotAssignOutsideTeam.status === 403
+      && supervisorAssignedInstallment.status === 200
+      && supervisorAssignedInstallment.json?.data?.scheduled_responsible_seller_id === teamAlternative.id
+      && masterFinalAssignment.status === 200
+      && masterFinalAssignment.json?.data?.scheduled_responsible_seller_id === s1.id,
+    JSON.stringify({ master: masterAssignedInstallment.status, seller: sellerCannotReassignInstallment.status,
+      external: supervisorCannotAssignOutsideTeam.status, supervisor: supervisorAssignedInstallment.json,
+      masterFinal: masterFinalAssignment.json }));
+  const explicitlyAssignedCharge = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s1.id}`, tok(master));
+  check('responsável definido na cobrança prevalece sobre o consultor atual do cadastro do cliente',
+    explicitlyAssignedCharge.json?.data?.some((row) => row.installment_plan_id === unlinkedPlan.json?.data?.installment_plan_id
+      && row.responsible_seller_id === s1.id && row.seller_name === s1.name),
+    JSON.stringify(explicitlyAssignedCharge.json?.data?.find((row) => row.installment_plan_id === unlinkedPlan.json?.data?.installment_plan_id)));
   const unlinkedTransferredReceipt = await api('POST', '/api/management/sales', tok(master), {
-    seller_id: unlinkedChargeRow?.responsible_seller_id,
+    seller_id: s1.id,
     customer_name: 'Cliente com cobrança sem vínculo transferida', service_name: 'Multa',
     amount: 250, closed_at: reassignedDueDate, installment_number: 2, installment_total: 2,
     installment_plan_id: unlinkedPlan.json?.data?.installment_plan_id,
     installment_frequency: 'monthly', payment_method: 'pix', closing_method: 'remoto', is_settlement: true,
   });
-  check('recebimento de cobrança sem client_id valida e grava a nova consultora atual do cliente',
-    unlinkedTransferredReceipt.status === 201 && unlinkedTransferredReceipt.json?.data?.seller_id === s2.id,
+  check('recebimento de cobrança sem client_id respeita o consultor escolhido nesta parcela',
+    unlinkedTransferredReceipt.status === 201 && unlinkedTransferredReceipt.json?.data?.seller_id === s1.id,
     JSON.stringify(unlinkedTransferredReceipt.json));
 
   console.log('\n== Agenda de valores individuais por parcela ==');

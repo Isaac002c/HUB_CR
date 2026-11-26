@@ -88,8 +88,10 @@ export default function Vendas() {
         if (!installment?.seller_id) throw new Error('Esta cobrança não possui um responsável válido para registrar o recebimento.');
         const savedDueDate = String(installment.next_installment_due_date || '').substring(0, 10);
         const savedExpectedAmount = Number(installment.expected_amount ?? installment.pending_amount ?? installment.amount ?? 0);
+        const responsibleSellerId = form.responsible_seller_id || null;
         const scheduleChanged = form.next_installment_due_date !== savedDueDate
-          || Math.round(Number(form.next_installment_amount) * 100) !== Math.round(savedExpectedAmount * 100);
+          || Math.round(Number(form.next_installment_amount) * 100) !== Math.round(savedExpectedAmount * 100)
+          || (form.can_change_responsible && responsibleSellerId !== (installment.scheduled_responsible_seller_id || null));
         if (scheduleChanged) {
           // Persist the edited projection first so the receipt is checked against
           // the same amount/date the user sees in this modal.
@@ -99,9 +101,15 @@ export default function Vendas() {
         const installmentNumber = Number(installment.next_installment_number);
         const installmentTotal = Number(installment.installment_total);
         const finalInstallment = installmentNumber >= installmentTotal;
+        const receiptSellerId = form.can_change_responsible
+          ? (responsibleSellerId || installment.fallback_responsible_seller_id || installment.responsible_seller_id || installment.seller_id)
+          : (installment.responsible_seller_id || installment.seller_id);
+        const receiptSellerName = form.responsible_options?.find((item) => item.seller_id === receiptSellerId)?.name
+          || installment.fallback_seller_name
+          || (receiptSellerId === installment.responsible_seller_id ? installment.seller_name : null);
         await createSale({
-          seller_id: installment.responsible_seller_id || installment.seller_id,
-          seller_display_name: installment.seller_name,
+          seller_id: receiptSellerId,
+          seller_display_name: receiptSellerName,
           client_id: installment.client_id || null,
           company_id: installment.company_id || null,
           lead_id: installment.lead_id || null,
@@ -327,6 +335,8 @@ export default function Vendas() {
       />}
       {scheduleModal && <InstallmentScheduleModal
         installment={scheduleModal}
+        responsibles={responsibles}
+        canChangeResponsible={role === 'master' || role === 'supervisor'}
         canOverrideLateCharges={role === 'master'}
         onClose={() => setScheduleModal(null)}
         onSubmit={submitSchedule}
@@ -500,13 +510,14 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
   </div>;
 }
 
-function InstallmentScheduleModal({ installment, canOverrideLateCharges = false, onClose, onSubmit }) {
+function InstallmentScheduleModal({ installment, responsibles = [], canChangeResponsible = false, canOverrideLateCharges = false, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
     next_installment_due_date: String(installment.next_installment_due_date || '').substring(0, 10),
     next_installment_amount: installment.expected_amount ?? installment.pending_amount ?? installment.amount ?? '',
     installment_frequency: installment.installment_frequency || 'monthly',
     installment_number: installment.next_installment_number,
+    responsible_seller_id: installment.scheduled_responsible_seller_id || '',
   });
   const initialPaymentDate = localIsoDate();
   const initialDueDate = String(installment.next_installment_due_date || '').substring(0, 10);
@@ -553,6 +564,9 @@ function InstallmentScheduleModal({ installment, canOverrideLateCharges = false,
           next_installment_amount: Number(form.next_installment_amount),
           installment_frequency: form.installment_frequency,
           installment_number: form.installment_number,
+          ...(canChangeResponsible ? { responsible_seller_id: form.responsible_seller_id || null } : {}),
+          can_change_responsible: canChangeResponsible,
+          responsible_options: responsibles,
           received_amount: amountNow,
           received_at: payment.closed_at,
           payment_method: payment.payment_method,
@@ -574,6 +588,17 @@ function InstallmentScheduleModal({ installment, canOverrideLateCharges = false,
           <Field label="Parcela"><input value={`${installment.next_installment_number}/${installment.installment_total}`} readOnly /></Field>
           <Field label="Periodicidade"><input value={installmentFrequencyLabel(form.installment_frequency)} readOnly /></Field>
         </div>
+        {canChangeResponsible && <div className="form-row">
+          <Field label="Consultor responsável por esta cobrança">
+            <select value={form.responsible_seller_id} onChange={set('responsible_seller_id')}>
+              <option value="">Automático · acompanhar consultor do cadastro do cliente</option>
+              {responsibles.filter((item) => item.role === 'seller').map((item) => (
+                <option key={item.seller_id} value={item.seller_id}>{item.name}</option>
+              ))}
+            </select>
+          </Field>
+          <div style={{ ...muted, alignSelf: 'end', paddingBottom: 12 }}>Vale somente para esta cobrança; recebimentos anteriores não são alterados.</div>
+        </div>}
         <div style={paymentConfirmationInfo}><strong>Previsto nesta cobrança:</strong> {formatBRL(form.next_installment_amount)} · <strong>Já recebido:</strong> {formatBRL(installment.received_amount || 0)} · <strong>Saldo antes deste recebimento:</strong> {formatBRL(Math.max(Number(form.next_installment_amount || 0) - Number(installment.received_amount || 0), 0))}.</div>
         <section style={installmentPaymentCard}>
           <div>
