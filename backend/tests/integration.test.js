@@ -848,7 +848,7 @@ async function main() {
   const nextMonthDate = new Date(`${firstScheduledDue}T12:00:00Z`);
   nextMonthDate.setUTCMonth(nextMonthDate.getUTCMonth() + 1, 1);
   const nextMonthDue = nextMonthDate.toISOString().substring(0, 10);
-  const moveOutsideCompetence = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(sup), {
+  const moveOutsideCompetence = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(master), {
     next_installment_due_date: nextMonthDue,
     next_installment_amount: 600,
     installment_frequency: 'manual',
@@ -866,7 +866,7 @@ async function main() {
       && String(row.next_installment_due_date).substring(0, 10) === nextMonthDue),
   JSON.stringify(selectedFutureFollowUps.json?.data));
   const overdueDue = new Date(Date.now() - (3 * 24 * 60 * 60 * 1000)).toISOString().substring(0, 10);
-  const moveToOverdue = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(sup), {
+  const moveToOverdue = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(master), {
     next_installment_due_date: overdueDue,
     next_installment_amount: 600,
     installment_frequency: 'manual',
@@ -877,7 +877,7 @@ async function main() {
       && row.follow_up_status === 'overdue'
       && String(row.next_installment_due_date).substring(0, 10) === overdueDue),
   JSON.stringify(futureWithOverdue.json?.data));
-  const restoreSchedule = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(sup), {
+  const restoreSchedule = await api('PATCH', `/api/management/sales/installments/${crossingSale.json.data.installment_plan_id}`, tok(master), {
     next_installment_due_date: firstScheduledDue,
     next_installment_amount: 600,
     installment_frequency: 'weekly',
@@ -1201,41 +1201,35 @@ async function main() {
     installment_frequency: 'monthly',
     responsible_seller_id: s2.id,
   };
-  const teamAlternative = (await appPool.query(
-    `SELECT id FROM users WHERE tenant_id=$1 AND team_id=$2 AND role='seller' AND id<>$3
-       AND COALESCE(is_active,true)=true ORDER BY name LIMIT 1`,
-    [T1.id, teamA.id, s2.id],
-  )).rows[0];
   const masterAssignedInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), installmentAssignmentBody);
   const sellerCannotReassignInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
     ...installmentAssignmentBody, responsible_seller_id: s1.id,
   });
-  const supervisorCannotAssignOutsideTeam = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
-    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id,
+  const sellerCannotEditInstallmentAmount = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
+    ...installmentAssignmentBody, next_installment_amount: 275, responsible_seller_id: undefined,
   });
-  const supervisorAssignedInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
-    ...installmentAssignmentBody, responsible_seller_id: teamAlternative?.id,
+  const supervisorCannotEditInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
+    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id,
   });
   const masterFinalAssignment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), {
     ...installmentAssignmentBody, responsible_seller_id: s1.id,
   });
-  check('Master e Supervisão podem escolher responsável; consultor e consultor externo não podem',
-    Boolean(teamAlternative?.id) && masterAssignedInstallment.status === 200
+  check('somente Master pode alterar a cobrança ou seu responsável; consultor e Supervisão são bloqueados',
+    masterAssignedInstallment.status === 200
       && sellerCannotReassignInstallment.status === 403
-      && supervisorCannotAssignOutsideTeam.status === 403
-      && supervisorAssignedInstallment.status === 200
-      && supervisorAssignedInstallment.json?.data?.scheduled_responsible_seller_id === teamAlternative.id
+      && sellerCannotEditInstallmentAmount.status === 403
+      && supervisorCannotEditInstallment.status === 403
       && masterFinalAssignment.status === 200
       && masterFinalAssignment.json?.data?.scheduled_responsible_seller_id === s1.id,
     JSON.stringify({ master: masterAssignedInstallment.status, seller: sellerCannotReassignInstallment.status,
-      external: supervisorCannotAssignOutsideTeam.status, supervisor: supervisorAssignedInstallment.json,
+      sellerAmount: sellerCannotEditInstallmentAmount.status, supervisor: supervisorCannotEditInstallment.status,
       masterFinal: masterFinalAssignment.json }));
   const explicitlyAssignedCharge = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s1.id}`, tok(master));
   check('responsável definido na cobrança prevalece sobre o consultor atual do cadastro do cliente',
     explicitlyAssignedCharge.json?.data?.some((row) => row.installment_plan_id === unlinkedPlan.json?.data?.installment_plan_id
       && row.responsible_seller_id === s1.id && row.seller_name === s1.name),
     JSON.stringify(explicitlyAssignedCharge.json?.data?.find((row) => row.installment_plan_id === unlinkedPlan.json?.data?.installment_plan_id)));
-  const unlinkedTransferredReceipt = await api('POST', '/api/management/sales', tok(master), {
+  const unlinkedTransferredReceipt = await api('POST', '/api/management/sales', tok(s1), {
     seller_id: s1.id,
     customer_name: 'Cliente com cobrança sem vínculo transferida', service_name: 'Multa',
     amount: 250, closed_at: reassignedDueDate, installment_number: 2, installment_total: 2,

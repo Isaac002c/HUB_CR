@@ -41,6 +41,7 @@ export default function Vendas() {
   const role = String(user.role || '').toLowerCase();
   const isConsultor = role === 'seller';
   const isSupervisor = role === 'supervisor';
+  const canEditInstallments = role === 'master';
   const showCommissionTotal = role === 'master';
 
   const load = useCallback(async () => {
@@ -225,7 +226,7 @@ export default function Vendas() {
 
       <section style={followUpCard}>
         <div style={followUpHeader}>
-          <div><strong>Cobranças programadas · {MONTHS[period.month - 1]} de {period.year}</strong><div style={muted}>Parcelas da competência selecionada e pendências vencidas de meses anteriores. Ajustes não alteram o faturamento.</div></div>
+          <div><strong>Cobranças programadas · {MONTHS[period.month - 1]} de {period.year}</strong><div style={muted}>Parcelas da competência selecionada e pendências vencidas de meses anteriores. Somente o Master pode ajustar vencimento, valor previsto ou responsável.</div></div>
           <span style={followUpCount}>{visibleFollowUps.length} pendência(s)</span>
         </div>
         {visibleFollowUps.length > 0 ? <div style={{ overflowX: 'auto' }}><table className="data-table" style={{ border: 0, borderRadius: 0, minWidth: 1120 }}>
@@ -240,7 +241,7 @@ export default function Vendas() {
             <td>{item.seller_name || '—'}</td>
             <td><span style={followUpStatusStyle(item.follow_up_status)}>{followUpStatusLabel(item.follow_up_status)}</span></td>
             <td><div style={followUpActions}>
-              <button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setScheduleModal(item)}>✎ Ajustar</button>
+              {canEditInstallments && <button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setScheduleModal(item)}>✎ Ajustar</button>}
               {item.is_next_installment
                 ? <button className="btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setModal({ sale: null, nextFrom: item })}>✓ Confirmar pagamento</button>
                 : <span style={{ ...muted, whiteSpace: 'nowrap' }}>Aguardar anterior</span>}
@@ -328,6 +329,7 @@ export default function Vendas() {
         sale={modal.sale}
         nextFrom={modal.nextFrom}
         responsibles={responsibles}
+        canEditInstallments={canEditInstallments}
         defaultSellerId={selectedConsultant?.id || ((isConsultor || isSupervisor) ? user.id : '')}
         lockSeller={isConsultor}
         onClose={() => setModal(null)}
@@ -336,7 +338,7 @@ export default function Vendas() {
       {scheduleModal && <InstallmentScheduleModal
         installment={scheduleModal}
         responsibles={responsibles}
-        canChangeResponsible={role === 'master' || role === 'supervisor'}
+        canChangeResponsible={canEditInstallments}
         canOverrideLateCharges={role === 'master'}
         onClose={() => setScheduleModal(null)}
         onSubmit={submitSchedule}
@@ -345,7 +347,7 @@ export default function Vendas() {
   );
 }
 
-function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, onClose, onSubmit }) {
+function SaleModal({ sale, nextFrom, responsibles, canEditInstallments = false, defaultSellerId, lockSeller, onClose, onSubmit }) {
   const source = sale || nextFrom;
   const nextNumber = nextFrom ? Number(nextFrom.next_installment_number) : null;
   const initialInstallment = Boolean(source?.installment_total);
@@ -478,7 +480,7 @@ function SaleModal({ sale, nextFrom, responsibles, defaultSellerId, lockSeller, 
             <Field label="Parcela atual"><input type="number" min="1" max="120" value={form.installment_number} onChange={set('installment_number')} readOnly={!sale || Boolean(nextFrom)} required /></Field>
             <Field label="Total de parcelas"><input type="number" min="1" max="120" value={form.installment_total} onChange={setInstallmentTotal} readOnly={Boolean(nextFrom)} required /></Field>
             <Field label="Periodicidade"><select value={form.installment_frequency} onChange={setFrequency}>{INSTALLMENT_FREQUENCIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
-            {!settled && (sale || nextFrom) && <Field label="Vencimento da próxima"><input type="date" value={form.next_installment_due_date} onChange={set('next_installment_due_date')} required /></Field>}
+            {!settled && (sale || nextFrom) && <Field label="Vencimento da próxima"><input type="date" value={form.next_installment_due_date} onChange={set('next_installment_due_date')} readOnly={Boolean(nextFrom) && !canEditInstallments} required /></Field>}
             <label style={{ ...checkStyle, minHeight: 42 }}><input type="checkbox" checked={settled} disabled={finalInstallment} onChange={(event) => setForm((previous) => ({ ...previous, is_settlement: event.target.checked }))} /> Quitação</label>
           </div>}
           {!sale && !nextFrom && hasInstallment && !settled && Number(form.installment_number) === 1 && <div style={{ width: '100%', marginTop: 12 }}>

@@ -1072,7 +1072,7 @@ router.delete('/sales/installments/:planId/:installmentNumber', requireRole('mas
   }
 });
 
-router.patch('/sales/installments/:planId', async (req, res) => {
+router.patch('/sales/installments/:planId', requireRole('master'), async (req, res) => {
   try {
     if (!UUID_PATTERN.test(req.params.planId)) {
       return res.status(400).json({ success: false, error: 'Parcelamento inválido.' });
@@ -1080,33 +1080,12 @@ router.patch('/sales/installments/:planId', async (req, res) => {
     const schedule = installmentScheduleFields(req.body);
     const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId, schedule.installment_number);
     if (!existing) return res.status(404).json({ success: false, error: 'Cobrança não encontrada.' });
-    const level = access.accessLevel(req.userRole, 'gestao');
-    if (level === 'own' && existing.assigned_seller_id !== req.userId) {
-      return res.status(403).json({ success: false, error: 'Acesso negado a esta cobrança.' });
-    }
-    if (level === 'team') {
-      const visibleRole = String(existing.assigned_seller_role || '').toLowerCase();
-      const visibleSchedule = existing.assigned_team_id === req.teamId
-        && (visibleRole === 'seller' || existing.assigned_seller_id === req.userId);
-      if (!visibleSchedule) return res.status(403).json({ success: false, error: 'Cobrança fora da sua equipe.' });
-    }
     if (Object.prototype.hasOwnProperty.call(schedule, 'responsible_seller_id')) {
-      const actorRole = String(req.userRole || '').toLowerCase();
-      if (!['master', 'supervisor'].includes(actorRole)) {
-        return res.status(403).json({ success: false, error: 'Somente Master e Supervisão podem alterar o consultor desta cobrança.' });
-      }
       if (schedule.responsible_seller_id) {
         const responsible = await mgmt.getSellerCommissionPct(schedule.responsible_seller_id, req.tenantId);
         if (!responsible || responsible.role !== 'seller') {
           return res.status(400).json({ success: false, error: 'Selecione um consultor ativo.' });
         }
-        if (actorRole === 'supervisor' && (!req.teamId || responsible.team_id !== req.teamId)) {
-          return res.status(403).json({ success: false, error: 'A Supervisão só pode atribuir cobranças a consultores da própria equipe.' });
-        }
-      } else if (actorRole === 'supervisor'
-        && existing.automatic_team_id !== req.teamId
-        && existing.automatic_seller_id !== req.userId) {
-        return res.status(403).json({ success: false, error: 'A Supervisão não pode devolver esta cobrança para um responsável de outra equipe.' });
       }
     }
     const updated = await mgmt.updateInstallmentSchedule(req.params.planId, schedule, req.tenantId);
