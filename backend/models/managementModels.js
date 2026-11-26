@@ -1147,9 +1147,27 @@ async function getInstallmentFollowUps(tenantId, {
                 ORDER BY s.installment_number DESC, s.closed_at DESC, s.created_at DESC
               ) AS row_number
          FROM sales s
-         LEFT JOIN users seller ON seller.id = s.seller_id
-         LEFT JOIN clients client ON client.id = s.client_id AND client.tenant_id = s.tenant_id
-         LEFT JOIN users client_owner ON client_owner.id = client.created_by AND client_owner.tenant_id = client.tenant_id
+         LEFT JOIN users seller ON seller.id = s.seller_id AND seller.tenant_id = s.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT linked_client.id, linked_client.created_by
+             FROM clients linked_client
+            WHERE linked_client.tenant_id = s.tenant_id
+              AND (
+                linked_client.id = s.client_id
+                OR (
+                  s.client_id IS NULL
+                  AND LOWER(TRIM(linked_client.name)) = LOWER(TRIM(s.customer_name))
+                  AND 1 = (
+                    SELECT COUNT(*)
+                      FROM clients name_match
+                     WHERE name_match.tenant_id = s.tenant_id
+                       AND LOWER(TRIM(name_match.name)) = LOWER(TRIM(s.customer_name))
+                  )
+                )
+              )
+            LIMIT 1
+         ) client ON TRUE
+         LEFT JOIN users client_owner ON client_owner.id = client.created_by AND client_owner.tenant_id = s.tenant_id
         WHERE ${where}
      ), open_plans AS (
        SELECT * FROM scoped
@@ -1304,8 +1322,26 @@ async function getLatestInstallmentPlan(tenantId, planId) {
             COALESCE(owner.role, sale.seller_role_snapshot, seller.role) AS assigned_seller_role,
             COALESCE(owner.team_id, sale.team_id) AS assigned_team_id
        FROM sales sale
-       LEFT JOIN clients client ON client.id = sale.client_id AND client.tenant_id = sale.tenant_id
-       LEFT JOIN users owner ON owner.id = client.created_by AND owner.tenant_id = client.tenant_id
+       LEFT JOIN LATERAL (
+         SELECT linked_client.id, linked_client.created_by
+           FROM clients linked_client
+          WHERE linked_client.tenant_id = sale.tenant_id
+            AND (
+              linked_client.id = sale.client_id
+              OR (
+                sale.client_id IS NULL
+                AND LOWER(TRIM(linked_client.name)) = LOWER(TRIM(sale.customer_name))
+                AND 1 = (
+                  SELECT COUNT(*)
+                    FROM clients name_match
+                   WHERE name_match.tenant_id = sale.tenant_id
+                     AND LOWER(TRIM(name_match.name)) = LOWER(TRIM(sale.customer_name))
+                )
+              )
+            )
+          LIMIT 1
+       ) client ON TRUE
+       LEFT JOIN users owner ON owner.id = client.created_by AND owner.tenant_id = sale.tenant_id
        LEFT JOIN users seller ON seller.id = sale.seller_id AND seller.tenant_id = sale.tenant_id
       WHERE sale.tenant_id = $1 AND sale.installment_plan_id = $2
       ORDER BY sale.installment_number DESC, sale.closed_at DESC, sale.created_at DESC
@@ -1496,10 +1532,27 @@ async function createSale(data) {
       if (latest.client_id && client_id && latest.client_id !== client_id) {
         throw domainError('O parcelamento não pertence a este cliente.', 'INVALID_INSTALLMENT_PLAN');
       }
-      if (latest.client_id) {
+      {
         const currentOwner = await client.query(
-          `SELECT created_by FROM clients WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
-          [latest.client_id, tenant_id]
+          `SELECT linked_client.created_by
+             FROM clients linked_client
+            WHERE linked_client.tenant_id = $1
+              AND (
+                linked_client.id = $2::uuid
+                OR (
+                  $2::uuid IS NULL
+                  AND LOWER(TRIM(linked_client.name)) = LOWER(TRIM($3))
+                  AND 1 = (
+                    SELECT COUNT(*)
+                      FROM clients name_match
+                     WHERE name_match.tenant_id = $1
+                       AND LOWER(TRIM(name_match.name)) = LOWER(TRIM($3))
+                  )
+                )
+              )
+            LIMIT 1
+            FOR SHARE OF linked_client`,
+          [tenant_id, latest.client_id || null, latest.customer_name || null]
         );
         const currentOwnerId = currentOwner.rows[0]?.created_by;
         if (currentOwnerId && currentOwnerId !== seller_id) {

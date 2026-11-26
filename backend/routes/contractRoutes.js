@@ -11,6 +11,16 @@ const { validateProcessStage } = require('../config/processStages');
 const { validateBusinessDeadline } = require('../config/businessDays');
 
 const plateKey = (p) => String(p || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+const DEFERRED_IMAGE_EDITOR_EMAIL = 'larissa@crrecursos.com.br';
+
+function allowDeferredImageUpdate(req, res, next) {
+  const role = String(req.userRole || '').toLowerCase();
+  const email = String(req.userEmail || '').trim().toLowerCase();
+  const roleAllowed = ['master', 'admin', 'supervisor'].includes(role);
+  const marketingEditor = role === 'seller' && email === DEFERRED_IMAGE_EDITOR_EMAIL;
+  if (roleAllowed || marketingEditor) return next();
+  return res.status(403).json({ success: false, error: 'Perfil sem permissão para editar imagem de deferido.' });
+}
 
 // Valida vínculo empresa/veículo de um processo contra o tenant autenticado.
 // Só atua quando company_id/vehicle_id são informados (não afeta o fluxo de cliente).
@@ -146,8 +156,9 @@ router.get('/real-infractor-alerts', requireModule('clients'), checkPermission('
   }
 });
 
-// A imagem é administrada na própria vitrine de deferidos. Consultores apenas a visualizam.
-router.patch('/:id/deferred-image', requireRole('master', 'admin', 'supervisor'), async (req, res) => {
+// Larissa do marketing recebe apenas a permissão de enviar/substituir imagem.
+// A exclusão da imagem permanece restrita a master e administrativo.
+router.patch('/:id/deferred-image', allowDeferredImageUpdate, async (req, res) => {
   try {
     const value = req.body.deferred_image_url;
     let imageUrl = null;

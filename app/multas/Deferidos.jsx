@@ -31,8 +31,12 @@ export default function Deferidos() {
   const [imageError, setImageError] = useState('');
 
   const currentUser = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || '{}') : {};
-  const canManageImage = ['master','admin','supervisor','super_admin'].includes(currentUser?.role);
-  const canDeleteImage = ['master','admin'].includes(currentUser?.role);
+  const currentRole = String(currentUser?.role || '').toLowerCase();
+  const isMarketingImageEditor = currentRole === 'seller'
+    && String(currentUser?.email || '').trim().toLowerCase() === 'larissa@crrecursos.com.br';
+  const canManageImage = ['master', 'admin', 'supervisor', 'super_admin'].includes(currentRole)
+    || isMarketingImageEditor;
+  const canDeleteImage = ['master', 'admin'].includes(currentRole);
 
   useEffect(() => { load(); }, []);
   const load = async () => {

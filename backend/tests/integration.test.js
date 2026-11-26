@@ -172,6 +172,10 @@ async function main() {
       ORDER BY email`,
     [T1.id, ['supervisao@crrecursos.com.br', 'marta@crrecursos.com.br', 'laine@crrecursos.com.br', 'larissa@crrecursos.com.br', 'kamila@crrecursos.com.br']],
   )).rows;
+  const larissaMarketingUser = await one(
+    `SELECT id, tenant_id, email, role FROM users WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)`,
+    [T1.id, 'larissa@crrecursos.com.br'],
+  );
   const requestedSellers = (await db.query(
     `SELECT s.name, s.email, s.active, u.seller_id
        FROM sellers s
@@ -449,6 +453,12 @@ async function main() {
   check('consultor não altera imagem do deferido', (await api('PATCH', `/api/contracts/${deferredClient.id}/deferred-image`, tok(s1), { deferred_image_url: deferredImage })).status === 403);
   const supervisorImage = await api('PATCH', `/api/contracts/${deferredCompany.id}/deferred-image`, tok(sup), { deferred_image_url: deferredImage });
   check('supervisor adiciona imagem somente ao processo deferido', supervisorImage.status === 200 && supervisorImage.json.data.deferred_image_url === deferredImage, JSON.stringify(supervisorImage.json));
+  const larissaImage = await api('PATCH', `/api/contracts/${deferredCompany.id}/deferred-image`, tok(larissaMarketingUser), { deferred_image_url: deferredImage });
+  check('login de Larissa do marketing pode adicionar/substituir imagem de deferido', larissaImage.status === 200
+    && larissaImage.json?.data?.deferred_image_url === deferredImage,
+  JSON.stringify(larissaImage.json));
+  check('Larissa do marketing não pode excluir imagem de deferido',
+    (await api('DELETE', `/api/contracts/${deferredCompany.id}/deferred-image`, tok(larissaMarketingUser))).status === 403);
   const defWithImage = await api('GET', '/api/contracts/deferred', tok(s1));
   check('consultor visualiza a imagem na vitrine somente leitura', defWithImage.json.data.some((row) => row.id === deferredCompany.id && row.deferred_image_url === deferredImage));
   check('supervisor não exclui imagem da vitrine', (await api('DELETE', `/api/contracts/${deferredCompany.id}/deferred-image`, tok(sup))).status === 403);
@@ -1161,6 +1171,38 @@ async function main() {
   check('recebimento futuro da cobrança transferida fica atribuído à nova consultora',
     transferredChargePaid.status === 201 && transferredChargePaid.json?.data?.seller_id === s2.id,
     JSON.stringify(transferredChargePaid.json));
+
+  const unlinkedReassignedClient = await api('POST', '/api/clients', tok(s1), {
+    name: 'Cliente com cobrança sem vínculo transferida', status: 'fechado',
+  });
+  const unlinkedPlan = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: s1.id,
+    customer_name: 'Cliente com cobrança sem vínculo transferida', service_name: 'Multa',
+    amount: 100, closed_at: '2026-10-02', installment_number: 1, installment_total: 2,
+    installment_frequency: 'monthly', payment_method: 'boleto', closing_method: 'remoto',
+    installment_schedule: [{ installment_number: 2, due_date: reassignedDueDate, expected_amount: 250 }],
+  });
+  const unlinkedClientTransfer = await api('PUT', `/api/clients/${unlinkedReassignedClient.json?.data?.id}`, tok(master), {
+    ...(unlinkedReassignedClient.json?.data || {}), consultant_id: s2.id,
+  });
+  const unlinkedTransferredCharge = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s2.id}`, tok(master));
+  const unlinkedChargeRow = unlinkedTransferredCharge.json?.data?.find((row) => row.installment_plan_id === unlinkedPlan.json?.data?.installment_plan_id);
+  check('cobrança antiga sem client_id acompanha o responsável quando há um único cliente com o mesmo nome',
+    unlinkedPlan.status === 201 && unlinkedClientTransfer.status === 200
+      && unlinkedChargeRow?.client_id == null
+      && unlinkedChargeRow?.responsible_seller_id === s2.id
+      && unlinkedChargeRow?.seller_name === s2.name,
+    JSON.stringify({ client: unlinkedClientTransfer.json, charge: unlinkedChargeRow }));
+  const unlinkedTransferredReceipt = await api('POST', '/api/management/sales', tok(master), {
+    seller_id: unlinkedChargeRow?.responsible_seller_id,
+    customer_name: 'Cliente com cobrança sem vínculo transferida', service_name: 'Multa',
+    amount: 250, closed_at: reassignedDueDate, installment_number: 2, installment_total: 2,
+    installment_plan_id: unlinkedPlan.json?.data?.installment_plan_id,
+    installment_frequency: 'monthly', payment_method: 'pix', closing_method: 'remoto', is_settlement: true,
+  });
+  check('recebimento de cobrança sem client_id valida e grava a nova consultora atual do cliente',
+    unlinkedTransferredReceipt.status === 201 && unlinkedTransferredReceipt.json?.data?.seller_id === s2.id,
+    JSON.stringify(unlinkedTransferredReceipt.json));
 
   console.log('\n== Agenda de valores individuais por parcela ==');
   const missingSchedule = await api('POST', '/api/management/sales', tok(master), {
