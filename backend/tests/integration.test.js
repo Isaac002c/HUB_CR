@@ -167,7 +167,7 @@ async function main() {
   await runSql('gestao_28_cpf_duplicate_guard.sql');
   const supervisionLogin = await one(`SELECT name, email, role, is_active FROM users WHERE id=$1`, [sup.id]);
   const requestedLogins = (await db.query(
-    `SELECT name, email, role, is_active, password_hash, team_id, supervisor_id
+    `SELECT id, name, email, role, is_active, password_hash, team_id, supervisor_id
        FROM users
       WHERE tenant_id=$1 AND email = ANY($2)
       ORDER BY email`,
@@ -1205,26 +1205,34 @@ async function main() {
   const sellerCannotReassignInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
     ...installmentAssignmentBody, responsible_seller_id: s1.id,
   });
-  const sellerCannotEditInstallmentAmount = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
-    ...installmentAssignmentBody, next_installment_amount: 275, responsible_seller_id: undefined,
+  const sellerCanEditOwnInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
+    installment_number: 2, next_installment_due_date: reassignedDueDate,
+    next_installment_amount: 260, installment_frequency: 'monthly',
+  });
+  const sellerCannotEditOtherInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s1), {
+    ...installmentAssignmentBody, next_installment_amount: 275,
   });
   const supervisorCanEditInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
-    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id, next_installment_amount: 260,
+    ...installmentAssignmentBody, responsible_seller_id: requestedLogins.find((user) => user.email === 'kamila@crrecursos.com.br')?.id,
+    next_installment_amount: 265,
   });
   const masterFinalAssignment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), {
     ...installmentAssignmentBody, responsible_seller_id: s1.id,
   });
-  check('Master e Supervisão podem alterar cobrança e responsável; consultores são bloqueados',
+  check('Master e Supervisão alteram responsável; consultor ajusta cobrança própria, mas não troca responsável nem edita cobrança alheia',
     masterAssignedInstallment.status === 200
       && sellerCannotReassignInstallment.status === 403
-      && sellerCannotEditInstallmentAmount.status === 403
+      && sellerCanEditOwnInstallment.status === 200
+      && Number(sellerCanEditOwnInstallment.json?.data?.next_installment_amount) === 260
+      && sellerCannotEditOtherInstallment.status === 403
       && supervisorCanEditInstallment.status === 200
-      && Number(supervisorCanEditInstallment.json?.data?.next_installment_amount) === 260
-      && supervisorCanEditInstallment.json?.data?.scheduled_responsible_seller_id === transferSeller.id
+      && Number(supervisorCanEditInstallment.json?.data?.next_installment_amount) === 265
+      && supervisorCanEditInstallment.json?.data?.scheduled_responsible_seller_id === requestedLogins.find((user) => user.email === 'kamila@crrecursos.com.br')?.id
       && masterFinalAssignment.status === 200
       && masterFinalAssignment.json?.data?.scheduled_responsible_seller_id === s1.id,
     JSON.stringify({ master: masterAssignedInstallment.status, seller: sellerCannotReassignInstallment.status,
-      sellerAmount: sellerCannotEditInstallmentAmount.status, supervisor: supervisorCanEditInstallment.json,
+      sellerOwn: sellerCanEditOwnInstallment.json, sellerOther: sellerCannotEditOtherInstallment.status,
+      supervisor: supervisorCanEditInstallment.json,
       masterFinal: masterFinalAssignment.json }));
   const explicitlyAssignedCharge = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s1.id}`, tok(master));
   check('responsável definido na cobrança prevalece sobre o consultor atual do cadastro do cliente',

@@ -1072,7 +1072,7 @@ router.delete('/sales/installments/:planId/:installmentNumber', requireRole('mas
   }
 });
 
-router.patch('/sales/installments/:planId', requireRole('master', 'supervisor'), async (req, res) => {
+router.patch('/sales/installments/:planId', requireRole('master', 'supervisor', 'seller'), async (req, res) => {
   try {
     if (!UUID_PATTERN.test(req.params.planId)) {
       return res.status(400).json({ success: false, error: 'Parcelamento inválido.' });
@@ -1080,11 +1080,25 @@ router.patch('/sales/installments/:planId', requireRole('master', 'supervisor'),
     const schedule = installmentScheduleFields(req.body);
     const existing = await mgmt.getLatestInstallmentPlan(req.tenantId, req.params.planId, schedule.installment_number);
     if (!existing) return res.status(404).json({ success: false, error: 'Cobrança não encontrada.' });
+    const actorRole = String(req.userRole || '').toLowerCase();
+    const isChangingResponsible = Object.prototype.hasOwnProperty.call(schedule, 'responsible_seller_id');
+    if (actorRole === 'seller'
+      && (existing.assigned_seller_id !== req.userId || isChangingResponsible)) {
+      return res.status(403).json({ success: false, error: 'Consultores podem ajustar somente as próprias cobranças e não podem trocar o responsável.' });
+    }
+    if (actorRole === 'supervisor'
+      && existing.assigned_seller_id !== req.userId
+      && (!req.teamId || existing.assigned_team_id !== req.teamId)) {
+      return res.status(403).json({ success: false, error: 'Você só pode ajustar cobranças da sua equipe.' });
+    }
     if (Object.prototype.hasOwnProperty.call(schedule, 'responsible_seller_id')) {
       if (schedule.responsible_seller_id) {
         const responsible = await mgmt.getSellerCommissionPct(schedule.responsible_seller_id, req.tenantId);
         if (!responsible || responsible.role !== 'seller') {
           return res.status(400).json({ success: false, error: 'Selecione um consultor ativo.' });
+        }
+        if (actorRole === 'supervisor' && req.teamId && responsible.team_id !== req.teamId) {
+          return res.status(403).json({ success: false, error: 'Supervisão só pode atribuir cobranças a consultores da própria equipe.' });
         }
       }
     }
