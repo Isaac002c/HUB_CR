@@ -106,6 +106,7 @@ async function main() {
   const t2user = await mkUser(T2, 'Dono T2', 'm@t2.com', 'master');
   const triType = await one(`INSERT INTO service_types(tenant_id,code,label) VALUES($1,'TRI','Troca de Real Infrator') RETURNING *`, [T1.id]);
   const crciType = await one(`INSERT INTO service_types(tenant_id,code,label) VALUES($1,'CRCI','CRCI') RETURNING *`, [T1.id]);
+  const multaType = await one(`INSERT INTO service_types(tenant_id,code,label) VALUES($1,'MULTA','Auto de Infração') RETURNING *`, [T1.id]);
 
   // Equipe A: supervisor + s1 + s2
   const teamA = await one(`INSERT INTO teams(tenant_id,name,supervisor_id) VALUES($1,'Equipe A',$2) RETURNING *`, [T1.id, sup.id]);
@@ -568,6 +569,35 @@ async function main() {
     real_infractor_name: 'Real Infrator Supervisão', status: 'DEFERIDO',
   });
   check('supervisora mantém permissão para andamento completo', supervisorFullStage.status === 201 && supervisorFullStage.json.data.stage === 'DEFERIDO', JSON.stringify(supervisorFullStage.json));
+  const adminPrescription = await api('POST', '/api/contracts', tok(admin), {
+    client_id: cliS1.id, service_id: multaType.id, seller_id: s1.id,
+    numero_multa: 'MULTA-PRESCRICAO-ADM', status: 'PRESCRIÇÃO',
+  });
+  const masterPrescription = await api('POST', '/api/contracts', tok(master), {
+    client_id: cliS2.id, service_id: multaType.id,
+    numero_multa: 'MULTA-PRESCRICAO-MASTER', status: 'PRESCRICAO',
+  });
+  const supervisorPrescription = await api('POST', '/api/contracts', tok(sup), {
+    client_id: cliS2.id, service_id: multaType.id,
+    numero_multa: 'MULTA-PRESCRICAO-SUP', status: 'PRESCRICAO',
+  });
+  const sellerPrescription = await api('POST', '/api/contracts', tok(s1), {
+    client_id: cliS1.id, service_id: multaType.id,
+    numero_multa: 'MULTA-PRESCRICAO-SELLER', status: 'PRESCRICAO',
+  });
+  const sellerPreservesPrescription = adminPrescription.json?.data?.id
+    ? await api('PUT', `/api/contracts/${adminPrescription.json.data.id}`, tok(s1), {
+      ...adminPrescription.json.data, service_id: multaType.id, status: 'PRESCRICAO',
+    })
+    : { status: 0, json: { error: 'Processo não foi criado.' } };
+  check('Master e Admin registram Prescrição; Supervisão e consultor não podem defini-la',
+    adminPrescription.status === 201 && masterPrescription.status === 201
+      && supervisorPrescription.status === 403 && sellerPrescription.status === 403,
+    JSON.stringify({ admin: adminPrescription.json, master: masterPrescription.json,
+      supervisor: supervisorPrescription.json, seller: sellerPrescription.json }));
+  check('consultor mantém Prescrição existente ao editar outros dados do processo',
+    sellerPreservesPrescription.status === 200 && sellerPreservesPrescription.json?.data?.stage === 'PRESCRICAO',
+    JSON.stringify(sellerPreservesPrescription.json));
 
   console.log('\n== Gestão: overview / ranking / comissão ==');
   const ovM = await api('GET', '/api/management/overview', tok(master));

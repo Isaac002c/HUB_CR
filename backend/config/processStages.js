@@ -16,6 +16,8 @@ const CRCI_STAGES = Object.freeze([
 ]);
 
 const FULL_WORKFLOW_ROLES = new Set(['master', 'admin', 'supervisor', 'super_admin']);
+const MASTER_ADMIN_ROLES = new Set(['master', 'admin']);
+const MASTER_ADMIN_ONLY_STAGES = new Set(['PRESCRICAO']);
 
 function normalizeStage(value) {
   return String(value || '')
@@ -26,9 +28,10 @@ function normalizeStage(value) {
     .toUpperCase();
 }
 
-function validateProcessStage(role, stage, serviceCode = null) {
+function validateProcessStage(role, stage, serviceCode = null, currentStage = null) {
   const normalized = normalizeStage(stage);
   const normalizedService = normalizeStage(serviceCode);
+  const normalizedRole = String(role || '').toLowerCase();
   if (!normalized) {
     return { ok: false, status: 400, error: 'Selecione o andamento do processo.' };
   }
@@ -40,10 +43,19 @@ function validateProcessStage(role, stage, serviceCode = null) {
     }
     return { ok: true, stage: normalized };
   }
+  if (MASTER_ADMIN_ONLY_STAGES.has(normalized)) {
+    if (normalizedService !== 'MULTA') {
+      return { ok: false, status: 400, error: 'Prescrição está disponível somente para Auto de Infração.' };
+    }
+    if (!MASTER_ADMIN_ROLES.has(normalizedRole)) {
+      if (normalizeStage(currentStage) === normalized) return { ok: true, stage: normalized };
+      return { ok: false, status: 403, error: 'Somente Master e Admin podem definir o andamento Prescrição.' };
+    }
+  }
   if (RETIRED_PROCESS_STAGES.includes(normalized)) {
     return { ok: false, status: 400, error: 'Esse andamento pertence a outro fluxo e não está disponível aqui.' };
   }
-  if (!FULL_WORKFLOW_ROLES.has(String(role || '').toLowerCase()) && !APR_STAGES.includes(normalized)) {
+  if (!FULL_WORKFLOW_ROLES.has(normalizedRole) && !APR_STAGES.includes(normalized)) {
     return { ok: false, status: 403, error: 'Consultores podem cadastrar somente os andamentos APRs.' };
   }
   return { ok: true, stage: normalized };
@@ -54,6 +66,7 @@ module.exports = {
   CRCI_STAGES,
   RETIRED_PROCESS_STAGES,
   FULL_WORKFLOW_ROLES,
+  MASTER_ADMIN_ONLY_STAGES,
   normalizeStage,
   validateProcessStage,
 };

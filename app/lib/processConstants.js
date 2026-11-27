@@ -27,13 +27,28 @@ export const STATUS_OPTIONS = [
 
 const FULL_WORKFLOW_ROLES = new Set(['master', 'admin', 'supervisor', 'super_admin']);
 const APR_STATUS_VALUES = new Set(APR_STATUS_OPTIONS.map((option) => option.value));
+const MASTER_ADMIN_ONLY_STATUS_VALUES = new Set(['PRESCRICAO']);
+const MASTER_ADMIN_ROLES = new Set(['master', 'admin']);
 
 export const hasFullWorkflowAccess = (role) => FULL_WORKFLOW_ROLES.has(String(role || '').toLowerCase());
-export const filterStatusOptionsForRole = (options, role) => (
-  hasFullWorkflowAccess(role)
+export const filterStatusOptionsForRole = (options, role, currentValue = '') => {
+  const normalizedRole = String(role || '').toLowerCase();
+  const canUseMasterAdminStatus = MASTER_ADMIN_ROLES.has(normalizedRole);
+  const allowedByWorkflow = hasFullWorkflowAccess(normalizedRole)
     ? options
-    : (options || []).filter((option) => APR_STATUS_VALUES.has(option.value))
-);
+    : (options || []).filter((option) => APR_STATUS_VALUES.has(option.value));
+  const filtered = (allowedByWorkflow || []).filter((option) => (
+    canUseMasterAdminStatus || !MASTER_ADMIN_ONLY_STATUS_VALUES.has(option.value)
+  ));
+  const normalizedCurrent = String(currentValue || '').trim().toUpperCase();
+  if (!canUseMasterAdminStatus && MASTER_ADMIN_ONLY_STATUS_VALUES.has(normalizedCurrent)) {
+    const currentOption = (options || []).find((option) => option.value === normalizedCurrent);
+    if (currentOption && !filtered.some((option) => option.value === normalizedCurrent)) {
+      return [{ ...currentOption, disabled: true }, ...filtered];
+    }
+  }
+  return filtered;
+};
 
 const STATUS_COLORS = {
   'APRS DEFESA PREVIA':      { bg: '#dbeafe', text: '#2563eb' },

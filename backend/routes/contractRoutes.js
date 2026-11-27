@@ -7,7 +7,7 @@ const companyModel = require('../models/companyModels');
 const vehicleModel = require('../models/companyVehicleModels');
 const { checkPermission, requireAdmin } = require('../middlewares/checkPermission');
 const { requireModule, requireRole, access } = require('../middlewares/authorize');
-const { validateProcessStage } = require('../config/processStages');
+const { validateProcessStage, normalizeStage } = require('../config/processStages');
 const { validateBusinessDeadline } = require('../config/businessDays');
 
 const plateKey = (p) => String(p || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
@@ -284,7 +284,12 @@ router.put('/:id', checkPermission('contracts:update'), async (req, res) => {
   try {
     const serviceCode = await contractModel.getServiceTypeCode(req.body.service_id);
     if (!serviceCode) return res.status(400).json({ success: false, error: 'Tipo de serviço inválido.' });
-    const stageCheck = validateProcessStage(req.userRole, req.body.status, serviceCode);
+    let currentStage = null;
+    if (normalizeStage(req.body.status) === 'PRESCRICAO'
+      && !['master', 'admin'].includes(String(req.userRole || '').toLowerCase())) {
+      currentStage = (await contractModel.getContractById(req.params.id, req.tenantId))?.status || null;
+    }
+    const stageCheck = validateProcessStage(req.userRole, req.body.status, serviceCode, currentStage);
     if (!stageCheck.ok) return res.status(stageCheck.status).json({ success: false, error: stageCheck.error });
     const triCheck = await validateTriDetails(req.body, serviceCode);
     if (!triCheck.ok) return res.status(triCheck.status).json({ success: false, error: triCheck.error });

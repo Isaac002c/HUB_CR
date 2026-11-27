@@ -43,6 +43,7 @@ const STATUS_OPTIONS_MULTA = [
   { value: '1 INSTANCIA - ANALISE',   label: '1ª Instância — Análise' },
   { value: 'APRS 2 INSTANCIA',        label: 'APRs — 2ª Instância' },
   { value: '2 INSTANCIA - ANALISE',   label: '2ª Instância — Análise' },
+  { value: 'PRESCRICAO',              label: 'Prescrição' },
   { value: 'DEFERIDO',                label: 'Deferido' },
   { value: 'INDEFERIDO',              label: 'Indeferido' },
   { value: 'TRANSITO EM JULGADO',     label: 'Trânsito em Julgado' },
@@ -101,6 +102,7 @@ const STATUS_COLORS = {
   'PROTOCOLADO':              { bg: '#f0fdf4', text: '#16a34a' },
   'DEFERIDO':                 { bg: '#dcfce7', text: '#15803d' },
   'INDEFERIDO':               { bg: '#fee2e2', text: '#991b1b' },
+  'PRESCRICAO':               { bg: '#fff7ed', text: '#c2410c' },
   'TRANSITO EM JULGADO':      { bg: '#f0fdf4', text: '#166534' },
   'FINALIZADO':               { bg: '#f1f5f9', text: '#475569' },
   'CANCELADO':                { bg: '#f1f5f9', text: '#94a3b8' },
@@ -1304,7 +1306,7 @@ export default function ClientDetail() {
                   // APR ao consultor esvaziava o seletor e impedia o cadastro.
                   const statusOp = name === 'CRCI'
                     ? getStatusOptions(name)
-                    : filterStatusOptionsForRole(getStatusOptions(name), currentUser?.role);
+                    : filterStatusOptionsForRole(getStatusOptions(name), currentUser?.role, contractForm.status);
                   return (
                     <>
                       {(name === 'MULTA' || name === 'TRI') && (
@@ -1416,7 +1418,7 @@ export default function ClientDetail() {
                         >
                           <option value="">Selecione o andamento...</option>
                           {statusOp.map(o => (
-                            <option key={o.value} value={o.value}>{o.label}</option>
+                            <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>
                           ))}
                         </select>
                       </div>

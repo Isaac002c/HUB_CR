@@ -96,6 +96,18 @@ ok('MASTER, ADMIN e SUPERVISOR mantêm o fluxo completo', () => {
     assert.strictEqual(validateProcessStage(role, 'DEFERIDO').ok, true, role);
   }
 });
+ok('Prescrição só pode ser definida por MASTER e ADMIN em Auto de Infração', () => {
+  assert.strictEqual(validateProcessStage('master', 'Prescrição', 'MULTA').ok, true);
+  assert.strictEqual(validateProcessStage('admin', 'PRESCRICAO', 'MULTA').ok, true);
+  for (const role of ['supervisor', 'seller', 'super_admin']) {
+    assert.strictEqual(validateProcessStage(role, 'PRESCRICAO', 'MULTA').status, 403, role);
+  }
+  assert.strictEqual(validateProcessStage('master', 'PRESCRICAO', 'TRI').status, 400);
+});
+ok('outros perfis podem salvar outros campos sem remover uma Prescrição já existente', () => {
+  assert.strictEqual(validateProcessStage('seller', 'PRESCRICAO', 'MULTA', 'PRESCRIÇÃO').ok, true);
+  assert.strictEqual(validateProcessStage('supervisor', 'PRESCRICAO', 'MULTA', 'APRS DEFESA PREVIA').status, 403);
+});
 ok('Mandatória, Excesso de Pontos e Protocolado foram retirados deste fluxo', () => {
   for (const stage of ['MANDATÓRIA', 'EXCESSO DE PONTOS', 'PROTOCOLADO']) {
     assert.strictEqual(validateProcessStage('master', stage).status, 400, stage);
