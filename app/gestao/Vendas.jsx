@@ -41,7 +41,7 @@ export default function Vendas() {
   const role = String(user.role || '').toLowerCase();
   const isConsultor = role === 'seller';
   const isSupervisor = role === 'supervisor';
-  const canEditInstallments = role === 'master';
+  const canEditInstallments = role === 'master' || role === 'supervisor';
   const showCommissionTotal = role === 'master';
 
   const load = useCallback(async () => {
@@ -226,7 +226,7 @@ export default function Vendas() {
 
       <section style={followUpCard}>
         <div style={followUpHeader}>
-          <div><strong>Cobranças programadas · {MONTHS[period.month - 1]} de {period.year}</strong><div style={muted}>Parcelas da competência selecionada e pendências vencidas de meses anteriores. Somente o Master pode ajustar vencimento, valor previsto ou responsável.</div></div>
+          <div><strong>Cobranças programadas · {MONTHS[period.month - 1]} de {period.year}</strong><div style={muted}>Parcelas da competência selecionada e pendências vencidas de meses anteriores. Master e Supervisão podem ajustar vencimento, valor previsto ou responsável.</div></div>
           <span style={followUpCount}>{visibleFollowUps.length} pendência(s)</span>
         </div>
         {visibleFollowUps.length > 0 ? <div style={{ overflowX: 'auto' }}><table className="data-table" style={{ border: 0, borderRadius: 0, minWidth: 1120 }}>

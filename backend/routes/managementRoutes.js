@@ -1072,7 +1072,7 @@ router.delete('/sales/installments/:planId/:installmentNumber', requireRole('mas
   }
 });
 
-router.patch('/sales/installments/:planId', requireRole('master'), async (req, res) => {
+router.patch('/sales/installments/:planId', requireRole('master', 'supervisor'), async (req, res) => {
   try {
     if (!UUID_PATTERN.test(req.params.planId)) {
       return res.status(400).json({ success: false, error: 'Parcelamento inválido.' });

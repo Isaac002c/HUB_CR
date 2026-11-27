@@ -1208,21 +1208,23 @@ async function main() {
   const sellerCannotEditInstallmentAmount = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(s2), {
     ...installmentAssignmentBody, next_installment_amount: 275, responsible_seller_id: undefined,
   });
-  const supervisorCannotEditInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
-    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id,
+  const supervisorCanEditInstallment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(sup), {
+    ...installmentAssignmentBody, responsible_seller_id: transferSeller.id, next_installment_amount: 260,
   });
   const masterFinalAssignment = await api('PATCH', `/api/management/sales/installments/${unlinkedPlan.json?.data?.installment_plan_id}`, tok(master), {
     ...installmentAssignmentBody, responsible_seller_id: s1.id,
   });
-  check('somente Master pode alterar a cobrança ou seu responsável; consultor e Supervisão são bloqueados',
+  check('Master e Supervisão podem alterar cobrança e responsável; consultores são bloqueados',
     masterAssignedInstallment.status === 200
       && sellerCannotReassignInstallment.status === 403
       && sellerCannotEditInstallmentAmount.status === 403
-      && supervisorCannotEditInstallment.status === 403
+      && supervisorCanEditInstallment.status === 200
+      && Number(supervisorCanEditInstallment.json?.data?.next_installment_amount) === 260
+      && supervisorCanEditInstallment.json?.data?.scheduled_responsible_seller_id === transferSeller.id
       && masterFinalAssignment.status === 200
       && masterFinalAssignment.json?.data?.scheduled_responsible_seller_id === s1.id,
     JSON.stringify({ master: masterAssignedInstallment.status, seller: sellerCannotReassignInstallment.status,
-      sellerAmount: sellerCannotEditInstallmentAmount.status, supervisor: supervisorCannotEditInstallment.status,
+      sellerAmount: sellerCannotEditInstallmentAmount.status, supervisor: supervisorCanEditInstallment.json,
       masterFinal: masterFinalAssignment.json }));
   const explicitlyAssignedCharge = await api('GET', `/api/management/sales/installments?month=${reassignedCompetence.month}&year=${reassignedCompetence.year}&seller_id=${s1.id}`, tok(master));
   check('responsável definido na cobrança prevalece sobre o consultor atual do cadastro do cliente',
